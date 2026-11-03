@@ -13,4 +13,4 @@ Trong tool có nút **Update** tự kiểm tra và cập nhật bản mới.
 
 ## Chạy từ mã nguồn
 `pip install pypdf` rồi `python app.py` (hoặc `Chay_App.bat`). Build exe: `build.bat`.
-Phát hành bản mới: sửa `version.py`, `git tag vX.Y.Z && git push --tags` — GitHub Actions tự build và đăng Release.
+Phát hành bản mới: sửa `APP_VERSION` trong `version.py` rồi push lên `main` — GitHub Actions tự build và đăng Release `vX.Y.Z`.
