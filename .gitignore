@@ -1,0 +1,7 @@
+__pycache__/
+build/
+dist/
+portable/
+*.spec
+Data/*.pdf
+*.update.exe

@@ -1,0 +1,48 @@
+name: Build My Movie Library
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install pyinstaller pypdf
+      - name: Build exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name "My Movie Library" --icon icon.ico
+          --add-data "icon.ico;." --collect-submodules pypdf app.py
+      - name: Portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "portable/Data" | Out-Null
+          Copy-Item "dist/My Movie Library.exe" "portable/"
+          Copy-Item "Data/HUONG_DAN.txt" "portable/Data/"
+          Copy-Item "README_PORTABLE.txt" "portable/README.txt"
+          Compress-Archive -Path "portable/*" -DestinationPath "My-Movie-Library-Portable.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: My-Movie-Library
+          path: |
+            dist/My Movie Library.exe
+            My-Movie-Library-Portable.zip
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: My Movie Library ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/My Movie Library.exe
+            My-Movie-Library-Portable.zip

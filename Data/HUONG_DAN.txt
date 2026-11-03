@@ -1,0 +1,3 @@
+Bo cac file PDF (ban in cua Karen's Directory Printer) vao thu muc nay.
+Moi file PDF = 1 o HDD. Ten file PDF = ten HDD (vd: "01 - AUDIO 1.pdf").
+Mo tool va bam "Nap data". File PDF khong bi xoa khi thoat / xoa data.
