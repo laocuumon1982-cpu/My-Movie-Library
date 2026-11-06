@@ -1,5 +1,5 @@
 APP_NAME = "My Movie Library"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 APP_AUTHOR = "Duy Anh"
 APP_TITLE = f"My Movie Library v{APP_VERSION[:3]} by {APP_AUTHOR}"
 GITHUB_REPO = "laocuumon1982-cpu/My-Movie-Library"

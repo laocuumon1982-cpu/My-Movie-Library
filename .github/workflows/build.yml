@@ -18,12 +18,12 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install
-        run: pip install pyinstaller pypdf
+        run: pip install pyinstaller
       - name: Build exe
         run: >
           pyinstaller --noconfirm --onefile --windowed
           --name "My Movie Library" --icon icon.ico
-          --add-data "icon.ico;." --collect-submodules pypdf app.py
+          --add-data "icon.ico;." app.py
       - name: Portable package
         shell: pwsh
         run: |

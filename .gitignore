@@ -4,4 +4,6 @@ dist/
 portable/
 *.spec
 Data/*.pdf
+Data/library.db*
+Data/settings.json
 *.update.exe

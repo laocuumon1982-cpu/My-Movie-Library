@@ -1,3 +1,3 @@
-Bo cac file PDF (ban in cua Karen's Directory Printer) vao thu muc nay.
-Moi file PDF = 1 o HDD. Ten file PDF = ten HDD (vd: "01 - AUDIO 1.pdf").
-Mo tool va bam "Nap data". File PDF khong bi xoa khi thoat / xoa data.
+Thu muc nay chua thu vien phim cua ban: library.db (tu tao khi quet o HDD dau tien) va settings.json.
+Muon chuyen tool sang may khac / USB: chep ca thu muc tool, thu vien di theo.
+Sao luu: trong tool bam "Them" > "Sao luu thu vien...".

@@ -4,7 +4,7 @@ from version import APP_VERSION, GITHUB_REPO
 
 UA = {'User-Agent': 'MyMovieLibrary-Updater', 'Accept': 'application/vnd.github+json'}
 FROZEN = getattr(sys, 'frozen', False)
-SOURCE_FILES = ('app.py', 'db.py', 'parse_kdp.py', 'updater.py', 'version.py')
+SOURCE_FILES = ('app.py', 'library.py', 'scanner.py', 'drives.py', 'updater.py', 'version.py')
 
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v or '')[:4]) or (0,)

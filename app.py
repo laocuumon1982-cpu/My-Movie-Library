@@ -1,470 +1,840 @@
-"""My Movie Library v2.0 by Duy Anh
-Bỏ các file PDF (Karen's Directory Printer) vào thư mục Data: mỗi PDF = 1 ổ HDD, tên file = tên HDD.
-Mở tool lên là trống; bấm "Nạp data" để đọc PDF; thoát tool dữ liệu tự mất (PDF không bị xóa)."""
-import os, sys, csv, re, queue, itertools, threading, subprocess, tempfile, webbrowser
+"""My Movie Library v3.0 by Duy Anh
+Chọn ổ HDD -> quét toàn bộ thư mục / thư mục con / tên file -> lưu vào thư viện (có mã số) -> tìm kiếm tức thì."""
+import os, sys, csv, json, queue, shutil, sqlite3, threading, subprocess, tempfile, time, webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import db, updater
-from parse_kdp import parse_text
+import library as L, scanner, drives, updater
+from drives import fmt_size
 from version import APP_TITLE, APP_VERSION, APP_AUTHOR, GITHUB_REPO
 
 FROZEN = getattr(sys, 'frozen', False)
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
 RES_DIR = getattr(sys, '_MEIPASS', APP_DIR)
-DATA_DIR = os.path.join(APP_DIR, 'Data')
-ALL = '▣  Tất cả HDD'
-ALL_CAT = 'Tất cả loại'
-EMPTY_MSG = 'Chưa có dữ liệu — bỏ file PDF vào thư mục Data rồi bấm "Nạp data".'
-FONT = 'Segoe UI'
+FONT = os.environ.get('MML_FONT', 'Segoe UI')
+
+
+def pick_data_dir():
+    """Thư viện nằm cạnh tool (portable). Nếu thư mục đó không ghi được thì dùng %APPDATA%."""
+    forced = os.environ.get('MML_DATA')
+    cands = [forced] if forced else [os.path.join(APP_DIR, 'Data'),
+                                     os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'My Movie Library')]
+    for d in cands:
+        try:
+            os.makedirs(d, exist_ok=True)
+            t = os.path.join(d, '.w'); open(t, 'w').close(); os.remove(t)
+            return d
+        except OSError:
+            continue
+    return tempfile.gettempdir()
+
+
+DATA_DIR = pick_data_dir()
+DB_PATH = os.path.join(DATA_DIR, 'library.db')
+SETTINGS = os.path.join(DATA_DIR, 'settings.json')
+
+KIND_LABELS = ['Tất cả loại', 'Video', 'Audio', 'Phụ đề', 'Ảnh', 'Khác']
+KIND_KEYS = [None, 'video', 'audio', 'sub', 'image', 'other']
+HINT = 'Gõ tên phim (không cần dấu)   •   ext:mkv   •   >1gb  <500mb   •   hdd:H01   •   mã: H01-000123 · H01-D00012 · H01-'
 
 THEMES = {
-    'dark': dict(bg='#0b1220', panel='#111a2e', card='#16223b', line='#25324d', fg='#e6edf7', muted='#8a99b5',
+    'dark': dict(bg='#0b1220', panel='#111a2e', card='#16223b', line='#25324d', fg='#e6edf7', muted='#8a99b5', dim='#5d6d8c',
                  accent='#3b82f6', accent_h='#2f6fe0', danger='#ef4444', danger_h='#d83a3a', ok='#22c55e',
-                 sel='#1d4ed8', hit='#5b4a0a', head='#0e1730'),
-    'light': dict(bg='#f1f5fb', panel='#ffffff', card='#ffffff', line='#d6deec', fg='#0f172a', muted='#64748b',
+                 sel='#1d4ed8', head='#0e1730', zebra='#131d33', warn='#f59e0b'),
+    'light': dict(bg='#f1f5fb', panel='#ffffff', card='#ffffff', line='#d6deec', fg='#0f172a', muted='#64748b', dim='#94a3b8',
                   accent='#2563eb', accent_h='#1d4ed8', danger='#dc2626', danger_h='#b91c1c', ok='#16a34a',
-                  sel='#bfdbfe', hit='#fde68a', head='#e8eefa'),
+                  sel='#bfdbfe', head='#e8eefa', zebra='#f6f9fe', warn='#d97706'),
 }
 
 
+def F(size, bold=False):
+    return (FONT, size, 'bold') if bold else (FONT, size)
+
+
+def load_settings():
+    try:
+        with open(SETTINGS, encoding='utf8') as f: return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(d):
+    try:
+        with open(SETTINGS, 'w', encoding='utf8') as f: json.dump(d, f)
+    except OSError:
+        pass
+
+
+# ======================================================================================= hộp thoại phụ
+def center(win, parent, w, h):
+    win.update_idletasks()
+    x = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
+    y = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 3)
+    win.geometry(f'{w}x{h}+{x}+{y}')
+
+
+class Modal(tk.Toplevel):
+    def __init__(self, app, title, w, h):
+        super().__init__(app)
+        self.app = app; self.C = app.C
+        self.title(title); self.configure(bg=self.C['bg']); self.transient(app); self.resizable(False, False)
+        center(self, app, app.px(w), app.px(h))
+        try: self.iconbitmap(os.path.join(RES_DIR, 'icon.ico'))
+        except Exception: pass
+        self.after(60, self._grab)
+
+    def _grab(self):
+        try: self.grab_set(); self.focus_set()
+        except tk.TclError: pass
+
+    def label(self, parent, text, size=10, bold=False, muted=False, **kw):
+        return tk.Label(parent, text=text, font=F(size, bold), bg=parent['bg'], fg=self.C['muted' if muted else 'fg'], **kw)
+
+
+class ScanProgress(Modal):
+    """Cửa sổ tiến độ khi quét ổ."""
+
+    def __init__(self, app, name):
+        super().__init__(app, 'Đang quét ổ đĩa…', 600, 290)
+        C = self.C; self.cancel_event = threading.Event(); self.t0 = time.time()
+        self.protocol('WM_DELETE_WINDOW', self.cancel)
+        body = tk.Frame(self, bg=C['bg']); body.pack(fill='both', expand=True, padx=24, pady=20)
+        self.label(body, 'Đang quét và lưu vào thư viện', 14, True).pack(anchor='w')
+        self.label(body, name, 10, muted=True).pack(anchor='w', pady=(2, 12))
+        row = tk.Frame(body, bg=C['bg']); row.pack(fill='x')
+        self.vals = {}
+        for k, t in (('files', 'File'), ('folders', 'Thư mục'), ('bytes', 'Dung lượng'), ('time', 'Thời gian')):
+            c = tk.Frame(row, bg=C['card'], highlightthickness=1, highlightbackground=C['line'], padx=12, pady=8)
+            c.pack(side='left', fill='x', expand=True, padx=(0, 8))
+            v = tk.Label(c, text='0', font=F(15, True), bg=C['card'], fg=C['accent'], anchor='w'); v.pack(anchor='w')
+            tk.Label(c, text=t, font=F(9), bg=C['card'], fg=C['muted'], anchor='w').pack(anchor='w')
+            self.vals[k] = v
+        self.path = tk.Label(body, text='', font=F(9), bg=C['bg'], fg=C['muted'], anchor='w', justify='left')
+        self.path.pack(fill='x', pady=(12, 6))
+        self.bar = ttk.Progressbar(body, mode='indeterminate', style='Pro.Horizontal.TProgressbar'); self.bar.pack(fill='x')
+        self.bar.start(14)
+        self.btn = ttk.Button(body, text='Hủy quét', style='Ghost.TButton', command=self.cancel); self.btn.pack(anchor='e', pady=(14, 0))
+        self.tick()
+
+    def tick(self):
+        try:
+            self.vals['time'].config(text=f'{int(time.time() - self.t0)} giây'); self.after(500, self.tick)
+        except tk.TclError:
+            pass
+
+    def update_stats(self, files, folders, size, rel):
+        self.vals['files'].config(text=f'{files:,}'); self.vals['folders'].config(text=f'{folders:,}')
+        self.vals['bytes'].config(text=fmt_size(size))
+        self.path.config(text=('…\\' + rel[-90:]) if len(rel) > 90 else rel)
+
+    def cancel(self):
+        self.cancel_event.set(); self.btn.config(state='disabled', text='Đang hủy…')
+
+
+class ScanDialog(Modal):
+    """Chọn ổ đĩa HDD (hoặc một thư mục) để quét."""
+
+    def __init__(self, app, on_start):
+        super().__init__(app, 'Chọn ổ HDD để quét', 860, 520)
+        C = self.C; self.on_start = on_start; self.drive_rows = {}; self.picked = None
+        body = tk.Frame(self, bg=C['bg']); body.pack(fill='both', expand=True, padx=22, pady=18)
+        self.label(body, 'Chọn ổ đĩa cần quét', 14, True).pack(anchor='w')
+        self.label(body, 'Tool sẽ quét toàn bộ thư mục, thư mục con và tên file của ổ, rồi lưu vào thư viện kèm mã số.', 9, muted=True).pack(anchor='w', pady=(2, 10))
+        cols = ('letter', 'label', 'type', 'fs', 'total', 'free', 'lib')
+        heads = ('Ổ', 'Nhãn ổ', 'Loại', 'Hệ tệp', 'Dung lượng', 'Còn trống', 'Trong thư viện')
+        widths = (60, 190, 120, 70, 100, 100, 140)
+        self.tv = ttk.Treeview(body, columns=cols, show='headings', selectmode='browse', height=8)
+        for c, h, w in zip(cols, heads, widths):
+            self.tv.heading(c, text=h, anchor='w'); self.tv.column(c, width=app.px(w), anchor='w')
+        self.tv.pack(fill='x'); self.tv.bind('<<TreeviewSelect>>', lambda e: self.on_pick())
+        self.tv.bind('<Double-1>', lambda e: self.start())
+        self.empty = self.label(body, '', 9, muted=True); self.empty.pack(anchor='w', pady=(4, 0))
+        form = tk.Frame(body, bg=C['bg']); form.pack(fill='x', pady=(12, 0))
+        self.label(form, 'Tên ổ trong thư viện:', 10).grid(row=0, column=0, sticky='w')
+        self.name = tk.StringVar(); ttk.Entry(form, textvariable=self.name, width=42, style='Search.TEntry').grid(row=0, column=1, sticky='w', padx=10, ipady=3)
+        self.code_lb = self.label(form, '', 10, True); self.code_lb.grid(row=0, column=2, sticky='w')
+        self.media = tk.BooleanVar(value=False)
+        ttk.Checkbutton(body, text='Chỉ quét file media (video, audio, phụ đề) — bỏ qua file khác', variable=self.media).pack(anchor='w', pady=(10, 0))
+        self.where = self.label(body, '', 9, muted=True); self.where.pack(anchor='w', pady=(6, 0))
+        bar = tk.Frame(body, bg=C['bg']); bar.pack(side='bottom', fill='x', pady=(10, 0))
+        ttk.Button(bar, text='Đóng', style='Ghost.TButton', command=self.destroy).pack(side='right')
+        self.go = ttk.Button(bar, text='▶  Bắt đầu quét', style='Accent.TButton', command=self.start, state='disabled')
+        self.go.pack(side='right', padx=8)
+        ttk.Button(bar, text='Chọn thư mục khác…', style='Ghost.TButton', command=self.pick_folder).pack(side='left')
+        ttk.Button(bar, text='⟳ Làm mới', style='Ghost.TButton', command=self.load).pack(side='left', padx=8)
+        self.after(80, self.load)
+
+    def load(self):
+        self.empty.config(text='Đang đọc danh sách ổ đĩa…'); self.update_idletasks()
+        self.app.drives = drives.list_drives()
+        self.tv.delete(*self.tv.get_children()); self.drive_rows = {}
+        known = {h['serial']: h for h in L.list_hdds(self.app.con) if h['serial']}
+        for i, d in enumerate(self.app.drives):
+            iid = f'd{i}'; self.drive_rows[iid] = d
+            inlib = known.get(d['serial']) if d['serial'] else None
+            self.tv.insert('', 'end', iid=iid, values=(d['letter'], d['label'] or '(không nhãn)',
+                           d['type'] + (' • hệ thống' if d['system'] else ''), d['fs'], fmt_size(d['total']), fmt_size(d['free']),
+                           f"{inlib['code']} · quét lại" if inlib else '—'))
+        self.empty.config(text='' if self.drive_rows else 'Không thấy ổ đĩa nào. Cắm ổ HDD rồi bấm "Làm mới", hoặc dùng "Chọn thư mục khác…".')
+        self.app.refresh_sidebar()
+
+    def on_pick(self):
+        s = self.tv.selection()
+        if not s: return
+        self.set_target(self.drive_rows[s[0]]['root'], self.drive_rows[s[0]])
+
+    def set_target(self, root, drive):
+        self.picked = (root, drive); ident = scanner.ident_for(root, drive.get('serial', '') if drive else '')
+        old = self.app.con.execute("SELECT code,name FROM hdd WHERE ident=?", (ident,)).fetchone()
+        if old:
+            self.name.set(old['name']); self.code_lb.config(text=f"Mã ổ: {old['code']}  (quét lại, thay dữ liệu cũ)", fg=self.C['warn'])
+        else:
+            lab = (drive or {}).get('label') or os.path.basename(root.rstrip('\\/')) or root
+            self.name.set(lab); self.code_lb.config(text=f"Mã ổ mới: {L.hdd_code(L.next_hdd_seq(self.app.con))}", fg=self.C['ok'])
+        self.where.config(text=f'Sẽ quét: {root}'); self.go.config(state='normal')
+
+    def pick_folder(self):
+        p = filedialog.askdirectory(parent=self, title='Chọn thư mục / ổ cần quét')
+        if not p: return
+        p = os.path.normpath(p)
+        match = next((d for d in self.app.drives if os.path.normcase(d['root'].rstrip('\\/')) == os.path.normcase(p.rstrip('\\/'))), None)
+        self.tv.selection_remove(*self.tv.selection()); self.set_target(match['root'] if match else p, match)
+
+    def start(self):
+        if not self.picked: return
+        root, drive = self.picked
+        if drive and drive.get('system') and not messagebox.askyesno(
+                'Ổ hệ thống', f"{drive['letter']} là ổ hệ thống (Windows), quét sẽ rất lâu và nhiều file không liên quan.\nVẫn quét?", parent=self):
+            return
+        name = self.name.get().strip(); media = self.media.get(); self.destroy()
+        self.on_start(root, name, drive, media, None)
+
+
+class EditHdd(Modal):
+    def __init__(self, app, h, on_ok):
+        super().__init__(app, 'Sửa tên / mã ổ', 520, 250)
+        C = self.C; body = tk.Frame(self, bg=C['bg']); body.pack(fill='both', expand=True, padx=22, pady=18)
+        self.label(body, f"Ổ {h['code']} — {h['name']}", 13, True).pack(anchor='w', pady=(0, 12))
+        g = tk.Frame(body, bg=C['bg']); g.pack(fill='x')
+        self.name = tk.StringVar(value=h['name']); self.code = tk.StringVar(value=h['code'])
+        self.label(g, 'Tên ổ:').grid(row=0, column=0, sticky='w', pady=4)
+        ttk.Entry(g, textvariable=self.name, width=40, style='Search.TEntry').grid(row=0, column=1, padx=10, ipady=3)
+        self.label(g, 'Mã ổ:').grid(row=1, column=0, sticky='w', pady=4)
+        ttk.Entry(g, textvariable=self.code, width=12, style='Search.TEntry').grid(row=1, column=1, sticky='w', padx=10, ipady=3)
+        self.label(body, 'Đổi mã ổ sẽ đổi luôn tiền tố mã của mọi file / thư mục thuộc ổ (VD H01-000123 → PL1-000123).', 9, muted=True,
+                   wraplength=app.px(470), justify='left').pack(anchor='w', pady=(10, 0))
+        bar = tk.Frame(body, bg=C['bg']); bar.pack(side='bottom', fill='x')
+        ttk.Button(bar, text='Hủy', style='Ghost.TButton', command=self.destroy).pack(side='right')
+        ttk.Button(bar, text='Lưu', style='Accent.TButton', command=lambda: self.ok(on_ok)).pack(side='right', padx=8)
+
+    def ok(self, on_ok):
+        try: on_ok(self.name.get(), self.code.get())
+        except ValueError as e: messagebox.showwarning('Không lưu được', str(e), parent=self); return
+        self.destroy()
+
+
+# ======================================================================================= cửa sổ chính
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_TITLE); self.geometry('1380x820'); self.minsize(1080, 640)
+        self.title(APP_TITLE); self.minsize(1100, 680)
+        self.sf = max(1.0, float(self.tk.call('tk', 'scaling')) * 72 / 96)
+        w = min(self.px(1400), self.winfo_screenwidth() - 60); h = min(self.px(860), self.winfo_screenheight() - 90)
+        self.geometry(f'{w}x{h}+{max(0, (self.winfo_screenwidth() - w) // 2)}+{max(0, (self.winfo_screenheight() - h) // 3)}')
         try: self.iconbitmap(os.path.join(RES_DIR, 'icon.ico'))
         except Exception: pass
-        os.makedirs(DATA_DIR, exist_ok=True)
-        self.con = db.connect(':memory:')
-        self.theme = 'dark'; self.C = THEMES[self.theme]
-        self.sort_col, self.sort_rev = 'name', False
-        self.hdd_by_iid = {}; self.tree_info = {}; self.lazy = {}; self.dummy = {}
-        self._cnt = itertools.count(); self._after = None; self.loading = False
-        self.msgs = queue.Queue(); self.new_release = None
+        self.settings = load_settings(); self.theme = self.settings.get('theme', 'dark'); self.C = THEMES[self.theme]
+        self.con = L.connect(DB_PATH)
+        self.hid = None; self.drives = []; self.limit = 5000; self.dirty = set(); self.cur = None; self._after = None
+        self.sort = {'files': ('code', False), 'folders': ('code', False)}
+        self.msgs = queue.Queue(); self.new_release = None; self.scanning = None; self._lock = False
+        self.rows = {}; self.last_total = 0
         self._build(); self.apply_theme()
         self.protocol('WM_DELETE_WINDOW', self.on_close)
-        self.load_hdds(); self.refresh(); self.update_data_info()
-        self.after(150, self.pump)
-        self.after(1500, lambda: self.check_update(silent=True))
+        self.bind('<Control-f>', lambda e: (self.ent.focus_set(), self.ent.select_range(0, 'end')))
+        self.bind('<Control-o>', lambda e: self.open_scan_dialog()); self.bind('<Escape>', lambda e: self.q.set(''))
+        self.refresh_all(); self.after(150, self.pump)
+        self.after(300, self.refresh_drives_async); self.after(1800, lambda: self.check_update(silent=True))
 
-    # ------------------------------------------------------------------ giao diện
+    def px(self, n): return int(round(n * self.sf))
+
+    # ------------------------------------------------------------------ dựng giao diện
     def _build(self):
-        # Header
-        self.header = tk.Frame(self, height=64)
-        self.header.pack(fill='x')
-        self.header.pack_propagate(False)
-        lf = tk.Frame(self.header); lf.pack(side='left', padx=18)
-        self.lb_logo = tk.Label(lf, text='🎬', font=(FONT, 24)); self.lb_logo.pack(side='left')
-        tf = tk.Frame(lf); tf.pack(side='left', padx=10)
-        self.lb_title = tk.Label(tf, text='My Movie Library', font=(FONT, 17, 'bold'), anchor='w'); self.lb_title.pack(anchor='w')
-        self.lb_sub = tk.Label(tf, text=f'v{APP_VERSION[:3]}  •  by {APP_AUTHOR}  •  Quản lý phim theo thư mục HDD',
-                               font=(FONT, 9), anchor='w'); self.lb_sub.pack(anchor='w')
-        rf = tk.Frame(self.header); rf.pack(side='right', padx=14)
+        self.header = tk.Frame(self, height=self.px(66)); self.header.pack(fill='x'); self.header.pack_propagate(False)
+        lf = tk.Frame(self.header); lf.pack(side='left', padx=self.px(18))
+        self.logo = tk.Canvas(lf, highlightthickness=0, width=self.px(40), height=self.px(40)); self.logo.pack(side='left')
+        tf = tk.Frame(lf); tf.pack(side='left', padx=12)
+        self.lb_title = tk.Label(tf, text='My Movie Library', font=F(17, True), anchor='w'); self.lb_title.pack(anchor='w')
+        self.lb_sub = tk.Label(tf, text=f'v{APP_VERSION[:3]}  •  by {APP_AUTHOR}  •  Thư viện phim theo ổ HDD', font=F(9), anchor='w')
+        self.lb_sub.pack(anchor='w')
+        rf = tk.Frame(self.header); rf.pack(side='right', padx=self.px(14))
         self.btn_update = ttk.Button(rf, text='⬆  Update', style='Ghost.TButton', command=lambda: self.check_update(False))
         self.btn_theme = ttk.Button(rf, text='◐  Giao diện', style='Ghost.TButton', command=self.toggle_theme)
         self.btn_about = ttk.Button(rf, text='ⓘ  Giới thiệu', style='Ghost.TButton', command=self.about)
         for b in (self.btn_update, self.btn_theme, self.btn_about): b.pack(side='left', padx=3)
-        self.lb_new = tk.Label(rf, text='', font=(FONT, 9, 'bold'), padx=8)
-        self.lb_new.pack(side='left')
+        self.lb_new = tk.Label(rf, text='', font=F(9, True), padx=8); self.lb_new.pack(side='left')
         self.sep = tk.Frame(self, height=1); self.sep.pack(fill='x')
 
-        # Thanh hành động
-        act = tk.Frame(self); act.pack(fill='x', padx=16, pady=(12, 6)); self.act = act
-        self.btn_load = ttk.Button(act, text='⟳  Nạp data', style='Accent.TButton', command=self.load_data)
-        self.btn_clear = ttk.Button(act, text='🗑  Xóa data', style='Danger.TButton', command=self.clear_data)
-        self.btn_open = ttk.Button(act, text='📂  Mở thư mục Data', style='Ghost.TButton', command=self.open_data)
-        self.btn_csv = ttk.Button(act, text='⇩  Xuất CSV', style='Ghost.TButton', command=self.export_csv)
-        for b in (self.btn_load, self.btn_clear, self.btn_open, self.btn_csv): b.pack(side='left', padx=(0, 8))
-        self.info = tk.Label(act, text='', font=(FONT, 9)); self.info.pack(side='right')
+        self.status = tk.Label(self, anchor='w', font=F(9), padx=16, pady=5); self.status.pack(fill='x', side='bottom')
 
-        # Thẻ thống kê
-        sr = tk.Frame(self); sr.pack(fill='x', padx=16, pady=(4, 8)); self.statrow = sr
+        tb = tk.Frame(self); tb.pack(fill='x', padx=16, pady=(12, 6)); self.tb = tb
+        self.btn_scan = ttk.Button(tb, text='＋  Quét ổ HDD', style='Accent.TButton', command=self.open_scan_dialog)
+        self.btn_rescan = ttk.Button(tb, text='⟳  Quét lại', style='Ghost.TButton', command=self.rescan_selected)
+        self.btn_edit = ttk.Button(tb, text='✎  Sửa tên / mã', style='Ghost.TButton', command=self.edit_selected)
+        self.btn_del = ttk.Button(tb, text='🗑  Xóa ổ', style='GhostDanger.TButton', command=self.delete_selected)
+        for b in (self.btn_scan, self.btn_rescan, self.btn_edit, self.btn_del): b.pack(side='left', padx=(0, 8))
+        self.btn_more = ttk.Menubutton(tb, text='⋯  Thêm', style='Ghost.TMenubutton')
+        self.more = tk.Menu(self.btn_more, tearoff=0); self.btn_more['menu'] = self.more
+        self.more.add_command(label='Sao lưu thư viện…', command=self.backup)
+        self.more.add_command(label='Khôi phục thư viện từ bản sao lưu…', command=self.restore)
+        self.more.add_command(label='Mở thư mục chứa thư viện', command=lambda: self.open_path(DATA_DIR))
+        self.more.add_separator(); self.more.add_command(label='Xóa toàn bộ thư viện…', command=self.wipe)
+        self.btn_csv = ttk.Button(tb, text='⇩  Xuất CSV', style='Ghost.TButton', command=self.export_csv)
+        self.btn_more.pack(side='right'); self.btn_csv.pack(side='right', padx=8)
+
+        sr = tk.Frame(self); sr.pack(fill='x', padx=16, pady=(4, 10)); self.statrow = sr
         self.cards = {}
-        for i, (k, t) in enumerate((('hdd', 'Ổ HDD'), ('folder', 'Thư mục'), ('file', 'File'),
-                                    ('pdf', 'PDF trong Data'), ('cat', 'Phân loại'))):
-            c = tk.Frame(sr, padx=14, pady=8, highlightthickness=1)
-            c.grid(row=0, column=i, sticky='nsew', padx=(0 if i == 0 else 8, 0)); sr.columnconfigure(i, weight=3 if k == 'cat' else 1, uniform='c' if k != 'cat' else '')
-            v = tk.Label(c, text='0', font=(FONT, 20, 'bold'), anchor='w'); v.pack(anchor='w')
-            tl = tk.Label(c, text=t, font=(FONT, 9), anchor='w'); tl.pack(anchor='w')
-            self.cards[k] = (c, v, tl)
-        self.cards['cat'][1].config(font=(FONT, 11, 'bold'))
+        for i, (k, t) in enumerate((('hdd', 'Ổ HDD trong thư viện'), ('folders', 'Thư mục'), ('files', 'File'),
+                                    ('bytes', 'Tổng dung lượng'), ('online', 'Đang cắm vào máy'))):
+            c = tk.Frame(sr, padx=16, pady=9, highlightthickness=1); c.grid(row=0, column=i, sticky='nsew', padx=(0 if i == 0 else 10, 0))
+            sr.columnconfigure(i, weight=1, uniform='c')
+            v = tk.Label(c, text='0', font=F(20, True), anchor='w'); v.pack(anchor='w')
+            tl = tk.Label(c, text=t, font=F(9), anchor='w'); tl.pack(anchor='w'); self.cards[k] = (c, v, tl)
 
-        # Tìm kiếm
-        sf = tk.Frame(self); sf.pack(fill='x', padx=16, pady=(0, 8)); self.sf = sf
+        sf = tk.Frame(self); sf.pack(fill='x', padx=16, pady=(0, 4)); self.sf_row = sf
+        self.lb_s = tk.Label(sf, text='🔍', font=F(13)); self.lb_s.pack(side='left')
         self.q = tk.StringVar(); self.q.trace_add('write', lambda *_: self._debounce())
-        self.lb_s = tk.Label(sf, text='🔍', font=(FONT, 12)); self.lb_s.pack(side='left')
-        self.ent = ttk.Entry(sf, textvariable=self.q, width=44, style='Search.TEntry', font=(FONT, 11))
-        self.ent.pack(side='left', padx=(6, 10), ipady=4); self.ent.focus()
-        self.cat = tk.StringVar(value=ALL_CAT)
-        ttk.Combobox(sf, textvariable=self.cat, state='readonly', width=13, font=(FONT, 10),
-                     values=[ALL_CAT, 'Phim', 'Series', 'Anime', 'Audio', 'Game']).pack(side='left', padx=4)
-        self.cat.trace_add('write', lambda *_: self.refresh())
-        self.parents = tk.BooleanVar(value=False)
-        ttk.Checkbutton(sf, text='Hiện cả thư mục cha', variable=self.parents, command=self.refresh).pack(side='left', padx=12)
-        self.prog = ttk.Progressbar(sf, mode='determinate', length=260, style='Pro.Horizontal.TProgressbar')
-        self.lb_prog = tk.Label(sf, text='', font=(FONT, 9))
+        self.ent = ttk.Entry(sf, textvariable=self.q, style='Search.TEntry', font=F(12)); self.ent.pack(side='left', fill='x', expand=True, padx=(8, 8), ipady=5)
+        ttk.Button(sf, text='✕', width=3, style='Ghost.TButton', command=lambda: self.q.set('')).pack(side='left', padx=(0, 8))
+        self.kind = tk.StringVar(value=KIND_LABELS[0])
+        cb = ttk.Combobox(sf, textvariable=self.kind, state='readonly', width=13, font=F(10), values=KIND_LABELS); cb.pack(side='left')
+        cb.bind('<<ComboboxSelected>>', lambda e: self._searched())
+        self.btn_more_rows = ttk.Button(sf, text='Xem thêm', style='Ghost.TButton', command=self.more_rows)
+        self.lb_count = tk.Label(sf, text='', font=F(10, True), padx=12); self.lb_count.pack(side='left')
+        self.hint = tk.Label(self, text=HINT, font=F(9), anchor='w'); self.hint.pack(fill='x', padx=16, pady=(0, 8))
 
-        # Thân
-        self.status = tk.Label(self, anchor='w', font=(FONT, 9), padx=16, pady=5); self.status.pack(fill='x', side='bottom')
-        pw = ttk.PanedWindow(self, orient='horizontal'); pw.pack(fill='both', expand=True, padx=16, pady=(0, 8))
-        left = ttk.Frame(pw); pw.add(left, weight=1)
-        self.hl = ttk.Treeview(left, columns=('n',), show='tree headings', selectmode='browse')
-        self.hl.heading('#0', text='  Danh sách HDD', anchor='w'); self.hl.heading('n', text='Mục')
-        self.hl.column('#0', width=210); self.hl.column('n', width=54, anchor='e')
-        sbl = ttk.Scrollbar(left, command=self.hl.yview); self.hl.configure(yscrollcommand=sbl.set)
+        pw = ttk.PanedWindow(self, orient='horizontal'); pw.pack(fill='both', expand=True, padx=16, pady=(0, 6))
+        left = tk.Frame(pw, width=self.px(310), height=10); left.pack_propagate(False); pw.add(left, weight=0); self.left = left
+        self.lb_side = tk.Label(left, text='  Ổ HDD TRONG THƯ VIỆN', font=F(8, True), anchor='w'); self.lb_side.pack(fill='x', pady=(0, 4))
+        self.info = tk.Label(left, text='', font=F(9), justify='left', anchor='nw', padx=12, pady=10, wraplength=self.px(250))
+        self.info.pack(side='bottom', fill='x', pady=(6, 0))
+        hw = tk.Frame(left); hw.pack(fill='both', expand=True)
+        self.hl = ttk.Treeview(hw, columns=('n',), show='tree', selectmode='browse')
+        self.hl.column('#0', width=self.px(200), minwidth=self.px(120)); self.hl.column('n', width=self.px(62), minwidth=self.px(62), stretch=False, anchor='e')
+        sbl = ttk.Scrollbar(hw, command=self.hl.yview); self.hl.configure(yscrollcommand=sbl.set)
         sbl.pack(side='right', fill='y'); self.hl.pack(fill='both', expand=True)
-        self.hl.bind('<<TreeviewSelect>>', lambda e: self.refresh())
+        self.hl.bind('<<TreeviewSelect>>', lambda e: self.on_sidebar())
 
-        self.nb = ttk.Notebook(pw); pw.add(self.nb, weight=5)
-        tab_list = ttk.Frame(self.nb); tab_tree = ttk.Frame(self.nb)
-        self.nb.add(tab_list, text='   📋  Danh sách   '); self.nb.add(tab_tree, text='   🌲  Cây thư mục   ')
+        self.body = tk.Frame(pw); pw.add(self.body, weight=1)
+        self.nb = ttk.Notebook(self.body); self.nb.pack(fill='both', expand=True)
+        t_files, t_fold, t_tree = ttk.Frame(self.nb), ttk.Frame(self.nb), ttk.Frame(self.nb)
+        self.nb.add(t_files, text='   📋  Tìm file   '); self.nb.add(t_fold, text='   📁  Thư mục   '); self.nb.add(t_tree, text='   🌲  Cây thư mục   ')
+        self.nb.bind('<<NotebookTabChanged>>', lambda e: self.refresh_tab())
 
-        right = ttk.PanedWindow(tab_list, orient='vertical'); right.pack(fill='both', expand=True)
-        cols = ('name', 'hdd', 'cat', 'n', 'path')
-        heads = {'name': 'Tên thư mục', 'hdd': 'HDD', 'cat': 'Loại', 'n': 'File', 'path': 'Đường dẫn'}
-        widths = {'name': 380, 'hdd': 150, 'cat': 70, 'n': 55, 'path': 420}
-        fr = ttk.Frame(right); right.add(fr, weight=3)
-        self.tv = ttk.Treeview(fr, columns=cols, show='headings', selectmode='extended')
-        for c in cols:
-            self.tv.heading(c, text=heads[c], command=lambda c=c: self.sort_by(c), anchor='w')
-            self.tv.column(c, width=widths[c], anchor='e' if c == 'n' else 'w')
-        sb = ttk.Scrollbar(fr, command=self.tv.yview); self.tv.configure(yscrollcommand=sb.set)
-        sb.pack(side='right', fill='y'); self.tv.pack(side='left', fill='both', expand=True)
-        self.tv.bind('<<TreeviewSelect>>', lambda e: self.show_files()); self.tv.bind('<Button-3>', self.menu)
-        self.m = tk.Menu(self, tearoff=0)
-        self.m.add_command(label='Sao chép đường dẫn', command=self.copy_path)
-        self.m.add_command(label='Mở thư mục (nếu HDD đang cắm)', command=self.open_folder)
-        bf = ttk.Frame(right); right.add(bf, weight=2)
-        self.lb_files = tk.Label(bf, text='  File trong thư mục đã chọn', anchor='w', font=(FONT, 9, 'bold'))
-        self.lb_files.pack(fill='x')
-        self.ft = ttk.Treeview(bf, columns=('name', 'ext'), show='headings')
-        self.ft.heading('name', text='Tên file', anchor='w'); self.ft.heading('ext', text='Đuôi', anchor='w')
-        self.ft.column('name', width=820); self.ft.column('ext', width=60)
-        sb2 = ttk.Scrollbar(bf, command=self.ft.yview); self.ft.configure(yscrollcommand=sb2.set)
-        sb2.pack(side='right', fill='y'); self.ft.pack(side='left', fill='both', expand=True)
+        fcols = ('code', 'name', 'ext', 'size', 'mtime', 'hdd', 'folder')
+        self.tv = self.make_table(t_files, fcols, ('Mã', 'Tên file', 'Loại', 'Dung lượng', 'Ngày sửa', 'Ổ', 'Thư mục'),
+                                  (118, 430, 62, 92, 128, 56, 330), {'size', 'ext'}, 'files')
+        self.tv.bind('<<TreeviewSelect>>', lambda e: self.on_select_file()); self.tv.bind('<Double-1>', lambda e: self.open_folder())
+        self.tv.bind('<Button-3>', lambda e: self.popup(e, self.tv, self.m_file))
+        dcols = ('code', 'name', 'hdd', 'path', 'files', 'size')
+        self.tf = self.make_table(t_fold, dcols, ('Mã', 'Tên thư mục', 'Ổ', 'Đường dẫn', 'File', 'Dung lượng'),
+                                  (118, 340, 56, 400, 60, 100), {'files', 'size'}, 'folders')
+        self.tf.bind('<<TreeviewSelect>>', lambda e: self.on_select_folder()); self.tf.bind('<Double-1>', lambda e: self.filter_folder())
+        self.tf.bind('<Button-3>', lambda e: self.popup(e, self.tf, self.m_fold))
 
-        self.tr = ttk.Treeview(tab_tree, columns=('n',), selectmode='browse')
-        self.tr.heading('#0', text='  HDD / Thư mục / File', anchor='w'); self.tr.heading('n', text='File')
-        self.tr.column('#0', width=780); self.tr.column('n', width=70, anchor='e')
-        sby = ttk.Scrollbar(tab_tree, command=self.tr.yview); self.tr.configure(yscrollcommand=sby.set)
+        self.tr = ttk.Treeview(t_tree, columns=('code', 'n', 'size'), selectmode='browse')
+        self.tr.heading('#0', text='  Ổ HDD / Thư mục / File', anchor='w'); self.tr.heading('code', text='Mã', anchor='w')
+        self.tr.heading('n', text='File', anchor='e'); self.tr.heading('size', text='Dung lượng', anchor='e')
+        self.tr.column('#0', width=self.px(560)); self.tr.column('code', width=self.px(120)); self.tr.column('n', width=self.px(70), anchor='e')
+        self.tr.column('size', width=self.px(100), anchor='e')
+        sby = ttk.Scrollbar(t_tree, command=self.tr.yview); self.tr.configure(yscrollcommand=sby.set)
         sby.pack(side='right', fill='y'); self.tr.pack(side='left', fill='both', expand=True)
-        self.tr.bind('<<TreeviewOpen>>', lambda e: self.load_files(self.tr.focus())); self.tr.bind('<Button-3>', self.tree_menu)
-        self.tm = tk.Menu(self, tearoff=0)
-        self.tm.add_command(label='Sao chép đường dẫn', command=self.copy_tree_path)
-        self.tm.add_command(label='Mở thư mục (nếu HDD đang cắm)', command=self.open_tree_folder)
+        self.tr.bind('<<TreeviewOpen>>', lambda e: self.populate(self.tr.focus())); self.tr.bind('<<TreeviewSelect>>', lambda e: self.on_select_tree())
+        self.tr.bind('<Button-3>', lambda e: self.popup(e, self.tr, self.m_tree))
 
+        self.empty = tk.Frame(self.body)
+        self.em_icon = tk.Label(self.empty, text='💽', font=F(46)); self.em_icon.pack(pady=(self.px(110), 8))
+        self.em_t = tk.Label(self.empty, text='Thư viện đang trống', font=F(18, True)); self.em_t.pack()
+        self.em_s = tk.Label(self.empty, text='Cắm ổ HDD vào máy rồi bấm nút bên dưới.\nTool quét toàn bộ thư mục và tên file, đánh mã số để bạn tìm kiếm nhanh.',
+                             font=F(10), justify='center'); self.em_s.pack(pady=(6, 16))
+        ttk.Button(self.empty, text='＋  Quét ổ HDD đầu tiên', style='Accent.TButton', command=self.open_scan_dialog).pack()
+
+        d = tk.Frame(self, highlightthickness=1); d.pack(fill='x', padx=16, pady=(0, 8), side='bottom'); self.detail = d
+        dl = tk.Frame(d); dl.pack(side='left', fill='x', expand=True, padx=12, pady=8); self.dl = dl
+        self.d1 = tk.Label(dl, text='Chọn một file hoặc thư mục để xem chi tiết', font=F(10, True), anchor='w'); self.d1.pack(fill='x')
+        self.d2 = tk.Label(dl, text='', font=F(9), anchor='w', justify='left'); self.d2.pack(fill='x')
+        dr = tk.Frame(d); dr.pack(side='right', padx=10); self.dr = dr
+        for t, c in (('Mở thư mục', self.open_folder), ('Sao chép đường dẫn', self.copy_path), ('Sao chép mã', self.copy_code)):
+            ttk.Button(dr, text=t, style='Ghost.TButton', command=c).pack(side='left', padx=3, pady=8)
+
+        self.m_file = tk.Menu(self, tearoff=0); self.m_fold = tk.Menu(self, tearoff=0); self.m_tree = tk.Menu(self, tearoff=0)
+        for m in (self.m_file, self.m_fold, self.m_tree):
+            m.add_command(label='Mở thư mục (nếu ổ đang cắm)', command=self.open_folder)
+            m.add_command(label='Sao chép đường dẫn đầy đủ', command=self.copy_path)
+            m.add_command(label='Sao chép mã', command=self.copy_code)
+        self.m_file.add_command(label='Sao chép tên file', command=self.copy_name); self.m_file.add_separator()
+        self.m_file.add_command(label='Chỉ xem file trong thư mục này', command=self.filter_folder)
+        self.m_file.add_command(label='Xem trong cây thư mục', command=self.reveal)
+        self.m_fold.add_separator(); self.m_fold.add_command(label='Xem file trong thư mục này', command=self.filter_folder)
+        self.m_fold.add_command(label='Xem trong cây thư mục', command=self.reveal)
+
+    def make_table(self, parent, cols, heads, widths, right, key):
+        wrap = ttk.Frame(parent); wrap.pack(fill='both', expand=True)
+        tv = ttk.Treeview(wrap, columns=cols, show='headings', selectmode='browse')
+        tv._heads = dict(zip(cols, heads)); tv._key = key
+        for c, h, w in zip(cols, heads, widths):
+            tv.heading(c, text=h, anchor='e' if c in right else 'w', command=lambda c=c, k=key: self.sort_by(k, c))
+            tv.column(c, width=self.px(w), anchor='e' if c in right else 'w', stretch=c in ('name', 'folder', 'path'))
+        sb = ttk.Scrollbar(wrap, command=tv.yview); tv.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y'); tv.pack(side='left', fill='both', expand=True)
+        return tv
+
+    # ------------------------------------------------------------------ giao diện: màu sắc
     def apply_theme(self):
-        C = self.C = THEMES[self.theme]
-        s = ttk.Style(self)
+        C = self.C = THEMES[self.theme]; s = ttk.Style(self)
         try: s.theme_use('clam')
         except tk.TclError: pass
         self.configure(bg=C['bg'])
-        s.configure('.', background=C['bg'], foreground=C['fg'], fieldbackground=C['panel'], bordercolor=C['line'],
-                    lightcolor=C['line'], darkcolor=C['line'], troughcolor=C['panel'], font=(FONT, 10))
+        s.configure('.', background=C['bg'], foreground=C['fg'], fieldbackground=C['panel'], bordercolor=C['line'], lightcolor=C['line'],
+                    darkcolor=C['line'], troughcolor=C['panel'], font=F(10))
         s.configure('TFrame', background=C['bg']); s.configure('TPanedwindow', background=C['bg'])
         s.configure('TLabel', background=C['bg'], foreground=C['fg'])
-        s.configure('Treeview', background=C['panel'], fieldbackground=C['panel'], foreground=C['fg'], rowheight=28,
-                    borderwidth=0, font=(FONT, 10))
+        s.configure('Treeview', background=C['panel'], fieldbackground=C['panel'], foreground=C['fg'], rowheight=self.px(28), borderwidth=0, font=F(10))
         s.map('Treeview', background=[('selected', C['sel'])], foreground=[('selected', '#ffffff' if self.theme == 'dark' else C['fg'])])
-        s.configure('Treeview.Heading', background=C['head'], foreground=C['muted'], relief='flat', font=(FONT, 9, 'bold'),
-                    padding=(8, 7), borderwidth=0)
+        s.configure('Treeview.Heading', background=C['head'], foreground=C['muted'], relief='flat', font=F(9, True), padding=(8, 7), borderwidth=0)
         s.map('Treeview.Heading', background=[('active', C['card'])])
         s.configure('TNotebook', background=C['bg'], borderwidth=0, tabmargins=(0, 0, 0, 0))
-        s.configure('TNotebook.Tab', background=C['bg'], foreground=C['muted'], padding=(14, 8), borderwidth=0, font=(FONT, 10, 'bold'))
+        s.configure('TNotebook.Tab', background=C['bg'], foreground=C['muted'], padding=(14, 8), borderwidth=0, font=F(10, True))
         s.map('TNotebook.Tab', background=[('selected', C['panel'])], foreground=[('selected', C['accent'])])
         for name, bg, hv, fg in (('Accent', C['accent'], C['accent_h'], '#ffffff'), ('Danger', C['danger'], C['danger_h'], '#ffffff'),
-                                  ('Ghost', C['card'], C['line'], C['fg'])):
+                                 ('Ghost', C['card'], C['line'], C['fg']), ('GhostDanger', C['card'], C['line'], C['danger'])):
             s.configure(f'{name}.TButton', background=bg, foreground=fg, borderwidth=0, focusthickness=0, padding=(14, 8),
-                        font=(FONT, 10, 'bold' if name != 'Ghost' else 'normal'), relief='flat')
-            s.map(f'{name}.TButton', background=[('active', hv), ('disabled', C['line'])], foreground=[('disabled', C['muted'])])
+                        font=F(10, name in ('Accent', 'Danger')), relief='flat')
+            s.map(f'{name}.TButton', background=[('active', hv), ('disabled', C['line'])], foreground=[('disabled', C['dim'])])
+        s.configure('Ghost.TMenubutton', background=C['card'], foreground=C['fg'], borderwidth=0, padding=(14, 8), relief='flat', arrowcolor=C['muted'])
+        s.map('Ghost.TMenubutton', background=[('active', C['line'])])
         s.configure('TEntry', fieldbackground=C['panel'], foreground=C['fg'], insertcolor=C['fg'], bordercolor=C['line'], padding=4)
-        s.configure('Search.TEntry', fieldbackground=C['panel'], foreground=C['fg'], insertcolor=C['fg'])
-        s.configure('TCombobox', fieldbackground=C['panel'], background=C['card'], foreground=C['fg'], arrowcolor=C['fg'],
-                    bordercolor=C['line'], padding=4)
+        s.configure('Search.TEntry', fieldbackground=C['panel'], foreground=C['fg'], insertcolor=C['fg'], bordercolor=C['line'], padding=6)
+        s.map('Search.TEntry', bordercolor=[('focus', C['accent'])], lightcolor=[('focus', C['accent'])], darkcolor=[('focus', C['accent'])])
+        s.configure('TCombobox', fieldbackground=C['panel'], background=C['card'], foreground=C['fg'], arrowcolor=C['fg'], bordercolor=C['line'], padding=5)
         s.map('TCombobox', fieldbackground=[('readonly', C['panel'])], foreground=[('readonly', C['fg'])])
+        for k, v in (('background', C['panel']), ('foreground', C['fg']), ('selectBackground', C['accent']), ('selectForeground', '#ffffff')):
+            self.option_add(f'*TCombobox*Listbox.{k}', v)
         s.configure('TCheckbutton', background=C['bg'], foreground=C['fg']); s.map('TCheckbutton', background=[('active', C['bg'])])
         s.configure('TScrollbar', background=C['card'], troughcolor=C['bg'], bordercolor=C['bg'], arrowcolor=C['muted'], relief='flat')
         s.configure('Pro.Horizontal.TProgressbar', background=C['accent'], troughcolor=C['card'], bordercolor=C['card'],
                     lightcolor=C['accent'], darkcolor=C['accent'], thickness=10)
-        for w in (self.act, self.statrow, self.sf): w.configure(bg=C['bg'])
+
+        for w in (self.tb, self.statrow, self.sf_row): w.configure(bg=C['bg'])
         self.header.configure(bg=C['head']); self.sep.configure(bg=C['line'])
-        for w in self.header.winfo_children() + [self.lb_logo, self.lb_title, self.lb_sub]: self._tint(w, C['head'])
-        self.lb_title.configure(fg=C['fg']); self.lb_sub.configure(fg=C['muted'])
-        self.lb_new.configure(bg=C['head'], fg=C['ok'])
-        self.info.configure(bg=C['bg'], fg=C['muted']); self.lb_s.configure(bg=C['bg'], fg=C['muted']); self.lb_prog.configure(bg=C['bg'], fg=C['muted'])
-        self.status.configure(bg=C['head'], fg=C['muted']); self.lb_files.configure(bg=C['head'], fg=C['muted'])
+        self._tint(self.header, C['head'])
+        self.lb_title.configure(fg=C['fg']); self.lb_sub.configure(fg=C['muted']); self.lb_new.configure(bg=C['head'], fg=C['ok'])
+        self.draw_logo()
+        self.lb_s.configure(bg=C['bg'], fg=C['muted']); self.lb_count.configure(bg=C['bg'], fg=C['muted']); self.hint.configure(bg=C['bg'], fg=C['dim'])
+        self.status.configure(bg=C['head'], fg=C['muted'])
         for k, (c, v, tl) in self.cards.items():
             c.configure(bg=C['card'], highlightbackground=C['line'], highlightcolor=C['line'])
-            v.configure(bg=C['card'], fg=C['accent'] if k != 'cat' else C['fg']); tl.configure(bg=C['card'], fg=C['muted'])
-        for m in (self.m, self.tm):
+            v.configure(bg=C['card'], fg=C['accent'] if k != 'online' else C['ok']); tl.configure(bg=C['card'], fg=C['muted'])
+        self.left.configure(bg=C['bg']); self.lb_side.configure(bg=C['bg'], fg=C['dim']); self.info.configure(bg=C['card'], fg=C['muted'])
+        self.body.configure(bg=C['bg']); self.empty.configure(bg=C['panel'])
+        for w in (self.em_icon, self.em_t, self.em_s): w.configure(bg=C['panel'])
+        self.em_t.configure(fg=C['fg']); self.em_s.configure(fg=C['muted'])
+        self.detail.configure(bg=C['card'], highlightbackground=C['line'], highlightcolor=C['line'])
+        for w in (self.dl, self.dr, self.d1, self.d2): w.configure(bg=C['card'])
+        self.d1.configure(fg=C['fg']); self.d2.configure(fg=C['muted'])
+        for m in (self.m_file, self.m_fold, self.m_tree, self.more):
             m.configure(bg=C['panel'], fg=C['fg'], activebackground=C['accent'], activeforeground='#ffffff', bd=0)
-        for t in (self.ft, self.tr): t.tag_configure('hit', background=C['hit'])
+        for t in (self.tv, self.tf):
+            t.tag_configure('odd', background=C['zebra'])
+        for t in (self.hl, self.tr):
+            t.tag_configure('off', foreground=C['dim']); t.tag_configure('on', foreground=C['fg'])
+        self.tr.tag_configure('file', foreground=C['muted']); self.tr.tag_configure('hdd', foreground=C['accent'])
 
     def _tint(self, w, bg):
         try: w.configure(bg=bg)
         except tk.TclError: pass
-        for ch in w.winfo_children() if hasattr(w, 'winfo_children') else []: self._tint(ch, bg)
+        for ch in w.winfo_children(): self._tint(ch, bg)
+
+    def draw_logo(self):
+        c = self.logo; C = self.C; c.delete('all'); s = self.px(40); c.configure(bg=C['head']); r = self.px(10)
+        pts = [r, 1, s - r, 1, s - 1, 1, s - 1, r, s - 1, s - r, s - 1, s - 1, s - r, s - 1, r, s - 1, 1, s - 1, 1, s - r, 1, r, 1, 1]
+        c.create_polygon(pts, smooth=True, fill=C['accent'], outline='')
+        c.create_polygon(s * .40, s * .29, s * .40, s * .71, s * .73, s * .50, fill='#ffffff', outline='')
 
     def toggle_theme(self):
-        self.theme = 'light' if self.theme == 'dark' else 'dark'; self.apply_theme(); self.refresh()
+        self.theme = 'light' if self.theme == 'dark' else 'dark'; self.apply_theme()
+        self.settings['theme'] = self.theme; save_settings(self.settings); self.refresh_sidebar(); self.mark_dirty(); self.refresh_tab()
+
+    # ------------------------------------------------------------------ dữ liệu & làm mới
+    def root_for(self, h):
+        """Đường dẫn gốc thật của ổ nếu đang cắm (khớp theo serial, nên đổi ký tự ổ vẫn nhận ra), ngược lại None."""
+        if h['serial']:
+            d = drives.find_by_serial(self.drives, h['serial'])
+            return d['root'] if d else None
+        return h['root'] if os.path.isdir(h['root']) else None
+
+    def hdd_row(self, hid): return L.hdd_row(self.con, hid)
+
+    def refresh_all(self):
+        self.refresh_stats(); self.refresh_sidebar(); self.mark_dirty(); self.refresh_tab()
+
+    def refresh_stats(self):
+        t = L.totals(self.con); online = sum(1 for h in L.list_hdds(self.con) if self.root_for(h))
+        self.cards['hdd'][1].config(text=f"{t['hdd']:,}"); self.cards['folders'][1].config(text=f"{t['folders']:,}")
+        self.cards['files'][1].config(text=f"{t['files']:,}"); self.cards['bytes'][1].config(text=fmt_size(t['bytes']))
+        self.cards['online'][1].config(text=f"{online}/{t['hdd']}")
+        if t['hdd'] == 0: self.empty.place(relx=0, rely=0, relwidth=1, relheight=1); self.empty.lift()
+        else: self.empty.place_forget()
+        for b in (self.btn_rescan, self.btn_edit, self.btn_del): b.config(state='normal' if t['hdd'] else 'disabled')
+
+    def refresh_sidebar(self):
+        self._lock = True
+        try:
+            self.hl.delete(*self.hl.get_children()); t = L.totals(self.con)
+            self.hl.insert('', 'end', iid='all', text='  ▣   Tất cả ổ HDD', values=(f"{t['files']:,}",), tags=('on',))
+            ids = set()
+            for h in L.list_hdds(self.con):
+                on = self.root_for(h) is not None; ids.add(h['id'])
+                self.hl.insert('', 'end', iid=f"h{h['id']}", text=f"  {'●' if on else '○'}   {h['code']}  ·  {h['name']}",
+                               values=(f"{h['nfiles']:,}",), tags=('on' if on else 'off',))
+            if self.hid not in ids: self.hid = None
+            self.hl.selection_set(f'h{self.hid}' if self.hid else 'all')
+        finally:
+            self._lock = False
+        self.update_info()
+
+    def update_info(self):
+        if not self.hid:
+            t = L.totals(self.con)
+            self.info.config(text=f"Toàn bộ thư viện\n{t['hdd']} ổ • {t['files']:,} file\n{fmt_size(t['bytes'])} dữ liệu\n\nChọn một ổ ở trên để lọc.")
+            return
+        h = self.hdd_row(self.hid); root = self.root_for(h)
+        used = max(0, (h['total'] or 0) - (h['free'] or 0))
+        self.info.config(text=(f"{h['code']}  ·  {h['name']}\n"
+                               f"{'● Đang cắm (' + root.rstrip(chr(92)) + ')' if root else '○ Chưa cắm vào máy'}\n"
+                               f"{h['nfiles']:,} file • {h['nfolders']:,} thư mục\n{fmt_size(h['bytes'])} phim/dữ liệu đã quét\n"
+                               f"Ổ: {fmt_size(used)} / {fmt_size(h['total'])}\nQuét lúc {h['scanned_at'] or '—'}"))
+
+    def on_sidebar(self):
+        s = self.hl.selection()
+        new = int(s[0][1:]) if s and s[0] != 'all' else None
+        if self._lock or new == self.hid: return          # sự kiện đến trễ do code tự chọn dòng: bỏ qua
+        self.hid = new
+        self.update_info(); self.mark_dirty(); self.refresh_tab()
+
+    def mark_dirty(self): self.dirty = {'files', 'folders', 'tree'}
+
+    def tab_name(self): return ('files', 'folders', 'tree')[self.nb.index(self.nb.select())]
+
+    def refresh_tab(self):
+        n = self.tab_name()
+        if n not in self.dirty: return
+        self.dirty.discard(n); getattr(self, 'load_' + n)()
 
     def _debounce(self):
         if self._after: self.after_cancel(self._after)
-        self._after = self.after(250, self.refresh)
+        self._after = self.after(220, self._searched)
 
-    def new_iid(self): return 'n%d' % next(self._cnt)
+    def _searched(self):
+        self.limit = 5000; self.dirty.update({'files', 'folders'}); self.dirty.discard(self.tab_name()); self.run_tab()
 
-    # ------------------------------------------------------------------ truy vấn
-    def sel_serial(self):
-        s = self.hl.selection()
-        return None if not s or s[0] == 'all' else self.hdd_by_iid.get(s[0])
+    def run_tab(self):
+        n = self.tab_name()
+        if n == 'files': self.load_files()
+        elif n == 'folders': self.load_folders()
 
-    def filters(self, include_empty):
-        serial = self.sel_serial()
-        sql = " FROM folder f JOIN hdd h ON h.serial=f.serial WHERE 1=1"; a = []
-        if not include_empty: sql += " AND f.nfiles>0"
-        if serial: sql += " AND f.serial=?"; a.append(serial)
-        if self.cat.get() != ALL_CAT: sql += " AND f.category=?"; a.append(self.cat.get())
-        words = db.norm(self.q.get()).split()
-        for w in words:
-            sql += " AND (f.name_norm LIKE ? OR f.id IN (SELECT folder_id FROM file WHERE name_norm LIKE ?))"
-            a += [f'%{w}%', f'%{w}%']
-        return sql, a, words, serial
+    def kind_key(self): return KIND_KEYS[KIND_LABELS.index(self.kind.get())]
 
-    def scalar(self, sql): return self.con.execute(sql).fetchone()[0]
+    def sort_by(self, key, col):
+        c, d = self.sort[key]; self.sort[key] = (col, (not d) if c == col else False)
+        self.limit = 5000; (self.load_files if key == 'files' else self.load_folders)()
 
-    def load_hdds(self):
-        self.hl.delete(*self.hl.get_children()); self.hdd_by_iid = {}
-        self.hl.insert('', 'end', iid='all', text=ALL, values=(self.scalar("SELECT COUNT(*) FROM folder WHERE nfiles>0"),))
-        rows = self.con.execute("SELECT h.serial,h.label,(SELECT COUNT(*) FROM folder f WHERE f.serial=h.serial AND f.nfiles>0) n FROM hdd h").fetchall()
-        for k, r in enumerate(sorted(rows, key=lambda r: db.natural_key(r['label']))):
-            iid = 'h%d' % k; self.hdd_by_iid[iid] = r['serial']
-            self.hl.insert('', 'end', iid=iid, text='  💽  ' + r['label'], values=(r['n'],))
-        self.hl.selection_set('all')
+    def mark_heads(self, tv, key):
+        c, d = self.sort[key]
+        for col, txt in tv._heads.items(): tv.heading(col, text=txt + (('  ▼' if d else '  ▲') if col == c else ''))
 
-    def refresh(self):
-        n = self.refresh_list(); self.refresh_tree(); self.update_stats(n)
+    def more_rows(self):
+        self.limit += 5000; self.run_tab()
 
-    def update_stats(self, shown):
-        nh = self.scalar("SELECT COUNT(*) FROM hdd")
-        self.cards['hdd'][1].config(text=f'{nh:,}')
-        self.cards['folder'][1].config(text=f'{self.scalar("SELECT COUNT(*) FROM folder WHERE nfiles>0"):,}')
-        self.cards['file'][1].config(text=f'{self.scalar("SELECT COUNT(*) FROM file"):,}')
-        self.cards['pdf'][1].config(text=str(len(self.pdf_list())))
-        cats = self.con.execute("SELECT category,COUNT(*) n FROM folder WHERE nfiles>0 GROUP BY 1 ORDER BY n DESC").fetchall()
-        self.cards['cat'][1].config(text='  •  '.join(f"{r['category']} {r['n']}" for r in cats) or '—')
-        self.status.config(text=('  ' + EMPTY_MSG) if nh == 0 else f'  Đang hiển thị {shown:,} thư mục')
+    def count_label(self, total, shown, noun):
+        self.lb_count.config(text=f'{total:,} {noun}' if shown >= total else f'{shown:,} / {total:,} {noun}')
+        if shown < total: self.btn_more_rows.pack(side='left', before=self.lb_count)
+        else: self.btn_more_rows.pack_forget()
 
-    # ------------------------------------------------------------------ tab danh sách
-    def refresh_list(self):
-        sql, a, _, _ = self.filters(include_empty=self.parents.get())
-        order = {'name': 'f.name_norm', 'hdd': 'h.label', 'cat': 'f.category', 'n': 'f.nfiles', 'path': 'f.path'}[self.sort_col]
-        rows = self.con.execute("SELECT f.id,f.name,h.label,f.category,f.nfiles,f.path" + sql +
-                                f" ORDER BY {order} {'DESC' if self.sort_rev else 'ASC'}", a).fetchall()
-        self.tv.delete(*self.tv.get_children())
-        for r in rows:
-            self.tv.insert('', 'end', iid=str(r['id']), values=(r['name'], r['label'], r['category'], r['nfiles'], r['path']))
-        self.show_files()
-        return len(rows)
+    # ------------------------------------------------------------------ tab: tìm file
+    def load_files(self):
+        col, desc = self.sort['files']; self.mark_heads(self.tv, 'files')
+        total, rows = L.search_files(self.con, self.q.get(), self.kind_key(), self.hid, col, desc, self.limit)
+        self.tv.delete(*self.tv.get_children()); self.rows = {}
+        for i, r in enumerate(rows):
+            iid = f"f{r['id']}"; self.rows[iid] = r
+            self.tv.insert('', 'end', iid=iid, tags=('odd',) if i % 2 else (),
+                           values=(r['code'], r['name'], r['ext'].lstrip('.').upper(), fmt_size(r['size']), L.fmt_time(r['mtime']), r['hcode'], r['path'] or '\\'))
+        self.count_label(total, len(rows), 'file'); self.set_status_search(total)
 
-    def sort_by(self, c):
-        self.sort_rev = (not self.sort_rev) if self.sort_col == c else False
-        self.sort_col = c; self.refresh()
+    def set_status_search(self, total):
+        self.last_total = total; t = L.totals(self.con)
+        self.status.config(text='  Thư viện trống — bấm "Quét ổ HDD" để bắt đầu.' if not t['hdd'] else
+                           f'  {total:,} kết quả  •  {t["files"]:,} file trong {t["hdd"]} ổ HDD  •  Thư viện: {DATA_DIR}')
 
-    def show_files(self):
-        self.ft.delete(*self.ft.get_children())
-        sel = self.tv.selection()
-        if len(sel) != 1: return
-        words = db.norm(self.q.get()).split()
-        for r in self.con.execute("SELECT name,ext,name_norm FROM file WHERE folder_id=? ORDER BY name_norm", (sel[0],)):
-            self.ft.insert('', 'end', values=(r['name'], r['ext']),
-                           tags=('hit',) if words and all(w in r['name_norm'] for w in words) else ())
+    def on_select_file(self):
+        s = self.tv.selection()
+        if not s: return
+        r = self.rows[s[0]]
+        self.cur = dict(type='file', id=r['id'], code=r['code'], name=r['name'], hid=r['hid'], rel=r['path'], hcode=r['hcode'])
+        self.d1.config(text=f"{r['name']}");
+        self.d2.config(text=f"Mã {r['code']}   •   Thư mục {r['fcode']}   •   Ổ {r['hcode']} · {r['hname']}   •   {fmt_size(r['size'])}   •   {L.fmt_time(r['mtime'])}\n{self.path_text(self.cur)}")
 
-    def menu(self, ev):
-        i = self.tv.identify_row(ev.y)
-        if i and i not in self.tv.selection(): self.tv.selection_set(i)
-        self.m.tk_popup(ev.x_root, ev.y_root)
+    # ------------------------------------------------------------------ tab: thư mục
+    def load_folders(self):
+        col, desc = self.sort['folders']; self.mark_heads(self.tf, 'folders')
+        total, rows = L.search_folders(self.con, self.q.get(), self.hid, col, desc, self.limit)
+        self.tf.delete(*self.tf.get_children()); self.rows = {}
+        for i, r in enumerate(rows):
+            iid = f"d{r['id']}"; self.rows[iid] = r
+            self.tf.insert('', 'end', iid=iid, tags=('odd',) if i % 2 else (),
+                           values=(r['code'], r['name'], r['hcode'], r['path'] or '\\', f"{r['nfiles']:,}", fmt_size(r['bytes'])))
+        self.count_label(total, len(rows), 'thư mục'); self.set_status_search(total)
 
-    def selected_paths(self):
-        return [self.con.execute("SELECT path FROM folder WHERE id=?", (i,)).fetchone()[0] for i in self.tv.selection()]
+    def on_select_folder(self):
+        s = self.tf.selection()
+        if not s: return
+        r = self.rows[s[0]]
+        self.cur = dict(type='folder', id=r['id'], code=r['code'], name=r['name'], hid=r['hid'], rel=r['path'], hcode=r['hcode'])
+        self.d1.config(text=r['name'])
+        self.d2.config(text=f"Mã {r['code']}   •   Ổ {r['hcode']} · {r['hname']}   •   {r['nfiles']:,} file   •   {fmt_size(r['bytes'])}\n{self.path_text(self.cur)}")
 
-    def copy_path(self): self.to_clipboard('\n'.join(self.selected_paths()))
+    def filter_folder(self):
+        """Lọc tab 'Tìm file' chỉ còn các file thuộc thư mục đang chọn (bằng mã thư mục)."""
+        if not self.cur: return
+        code = self.cur['code'] if self.cur['type'] == 'folder' else L.file_row(self.con, self.cur['id'])['fcode']
+        self.q.set(code); self.nb.select(0)
+
+    # ------------------------------------------------------------------ tab: cây thư mục
+    def load_tree(self):
+        self.tr.delete(*self.tr.get_children())
+        for h in L.list_hdds(self.con):
+            if self.hid and h['id'] != self.hid: continue
+            on = self.root_for(h) is not None
+            n = f"h{h['id']}"
+            self.tr.insert('', 'end', iid=n, text=f"  💽  {h['name']}", values=(h['code'], f"{h['nfiles']:,}", fmt_size(h['bytes'])), tags=('hdd',))
+            self.tr.insert(n, 'end', iid='x' + n, text='…')
+        self.status.config(text='  Cây thư mục: bấm ▸ để mở từng cấp. Chuột phải trên file/thư mục để mở, sao chép đường dẫn.')
+
+    def populate(self, node):
+        if not node or not self.tr.exists('x' + node): return
+        self.tr.delete('x' + node)
+        fid = L.root_folder(self.con, int(node[1:])) if node[0] == 'h' else int(node[1:])
+        if fid is None: return
+        for c in L.child_folders(self.con, fid):
+            n = f"d{c['id']}"
+            self.tr.insert(node, 'end', iid=n, text=f"  📁  {c['name']}", values=(c['code'], f"{c['tfiles']:,}", fmt_size(c['tbytes'])))
+            if self.con.execute("SELECT 1 FROM folder WHERE parent_id=? UNION SELECT 1 FROM file WHERE folder_id=? LIMIT 1", (c['id'], c['id'])).fetchone():
+                self.tr.insert(n, 'end', iid='x' + n, text='…')
+        for f in L.folder_files(self.con, fid):
+            self.tr.insert(node, 'end', iid=f"f{f['id']}", text=f"  🎬  {f['name']}", values=(f['code'], '', fmt_size(f['size'])), tags=('file',))
+
+    def on_select_tree(self):
+        s = self.tr.selection()
+        if not s: return
+        k, i = s[0][0], int(s[0][1:])
+        if k == 'f':
+            r = L.file_row(self.con, i)
+            if not r: return
+            self.cur = dict(type='file', id=i, code=r['code'], name=r['name'], hid=r['hid'], rel=r['path'], hcode=r['hcode'])
+            self.d1.config(text=r['name']); self.d2.config(text=f"Mã {r['code']}   •   Ổ {r['hcode']} · {r['hname']}   •   {fmt_size(r['size'])}   •   {L.fmt_time(r['mtime'])}\n{self.path_text(self.cur)}")
+        elif k == 'd':
+            r = L.folder_row(self.con, i)
+            if not r: return
+            self.cur = dict(type='folder', id=i, code=r['code'], name=r['name'], hid=r['hid'], rel=r['path'], hcode=r['hcode'])
+            self.d1.config(text=r['name']); self.d2.config(text=f"Mã {r['code']}   •   Ổ {r['hcode']}   •   {r['tfiles']:,} file (gồm thư mục con)   •   {fmt_size(r['tbytes'])}\n{self.path_text(self.cur)}")
+        elif k == 'h':
+            h = self.hdd_row(i); root = self.root_for(h)
+            self.cur = dict(type='folder', id=L.root_folder(self.con, i), code=h['code'], name=h['name'], hid=i, rel='', hcode=h['code'])
+            self.d1.config(text=f"{h['code']} · {h['name']}"); self.d2.config(text=f"{h['nfiles']:,} file • {fmt_size(h['bytes'])}\n{root or '(ổ chưa cắm vào máy)'}")
+
+    def reveal(self):
+        """Nhảy sang Cây thư mục và mở tới đúng file / thư mục đang chọn."""
+        if not self.cur: return
+        cur = dict(self.cur); self.hid = None; self.refresh_sidebar(); self.mark_dirty()
+        self.nb.select(2); self.update_idletasks(); self.refresh_tab()
+        did = cur['id'] if cur['type'] == 'folder' else L.file_row(self.con, cur['id'])['fid']
+        chain = []
+        while did is not None:
+            chain.append(did); r = L.folder_row(self.con, did); did = r['parent_id'] if r else None
+        node = f"h{cur['hid']}"; self.populate(node); self.tr.item(node, open=True)
+        for fid in reversed(chain[:-1]):
+            node = f'd{fid}'
+            if not self.tr.exists(node): break
+            self.populate(node); self.tr.item(node, open=True)
+        target = f"f{cur['id']}" if cur['type'] == 'file' else node
+        if self.tr.exists(target): self.tr.selection_set(target); self.tr.focus(target); self.tr.see(target)
+
+    # ------------------------------------------------------------------ thao tác file / thư mục
+    def path_text(self, cur):
+        h = self.hdd_row(cur['hid']); root = self.root_for(h)
+        p = L.full_path(root or '', cur['rel'], cur['name'] if cur['type'] == 'file' else None) if root else \
+            '\\' + '\\'.join(x for x in ((cur['rel'] or '').split('\\') + ([cur['name']] if cur['type'] == 'file' else [])) if x)
+        return (p if root else f"(ổ {h['code']} chưa cắm)  {p}")
+
+    def real_path(self, cur=None):
+        cur = cur or self.cur
+        if not cur: return None
+        root = self.root_for(self.hdd_row(cur['hid']))
+        return L.full_path(root, cur['rel'], cur['name'] if cur['type'] == 'file' else None) if root else None
+
+    def need_cur(self):
+        if not self.cur: messagebox.showinfo('Chưa chọn', 'Hãy chọn một file hoặc thư mục trước.'); return False
+        return True
 
     def open_folder(self):
-        p = self.selected_paths()
-        if p: self.open_path(p[0])
+        if not self.need_cur(): return
+        p = self.real_path()
+        if not p or not os.path.exists(p):
+            messagebox.showinfo('Không mở được', f"Ổ {self.cur['hcode']} chưa cắm vào máy hoặc file/thư mục đã bị di chuyển.\n\n{self.path_text(self.cur)}"); return
+        if sys.platform == 'win32':
+            if os.path.isfile(p): subprocess.Popen(['explorer', '/select,' + p])
+            else: os.startfile(p)
+        else:
+            subprocess.Popen(['xdg-open', p if os.path.isdir(p) else os.path.dirname(p)])
 
     def to_clipboard(self, text):
-        if text: self.clipboard_clear(); self.clipboard_append(text)
+        self.clipboard_clear(); self.clipboard_append(text); self.status.config(text=f'  Đã sao chép: {text}')
+
+    def copy_path(self):
+        if self.need_cur(): self.to_clipboard(self.real_path() or self.path_text(self.cur).split('  ', 1)[-1])
+
+    def copy_code(self):
+        if self.need_cur(): self.to_clipboard(self.cur['code'])
+
+    def copy_name(self):
+        if self.need_cur(): self.to_clipboard(self.cur['name'])
+
+    def popup(self, ev, tv, menu):
+        i = tv.identify_row(ev.y)
+        if not i: return
+        tv.selection_set(i); tv.focus(i); self.update_idletasks()
+        menu.tk_popup(ev.x_root, ev.y_root)
 
     def open_path(self, p):
-        if os.path.isdir(p):
-            os.startfile(p) if sys.platform == 'win32' else subprocess.Popen(['xdg-open', p])
-        else:
-            messagebox.showinfo('Không tìm thấy', f'Chưa cắm HDD hoặc thư mục không tồn tại:\n{p}')
+        if sys.platform == 'win32': os.startfile(p)
+        else: subprocess.Popen(['xdg-open', p])
 
-    # ------------------------------------------------------------------ tab cây thư mục
-    @staticmethod
-    def parts_of(path):
-        return tuple(p for p in re.sub(r'^[A-Za-z]:', '', path).replace('/', '\\').split('\\') if p)
-
-    def refresh_tree(self):
-        self.tr.delete(*self.tr.get_children())
-        self.tree_info.clear(); self.lazy.clear(); self.dummy.clear()
-        sql, a, words, serial = self.filters(include_empty=True)
-        rows = self.con.execute("SELECT f.id,f.serial,f.path,f.nfiles" + sql, a).fetchall()
-        present = {r['serial'] for r in rows}
-        active = bool(words) or self.cat.get() != ALL_CAT
-        hdds = [h for h in self.con.execute("SELECT serial,label FROM hdd")
-                if (not serial or h['serial'] == serial) and (not active or h['serial'] in present)]
-        hdds.sort(key=lambda h: db.natural_key(h['label']))
-        total = {}
-        for r in rows: total[r['serial']] = total.get(r['serial'], 0) + r['nfiles']
-        hnode, nodes = {}, {}
-        for h in hdds:
-            iid = self.new_iid(); hnode[h['serial']] = iid
-            self.tr.insert('', 'end', iid=iid, text='💽  ' + h['label'], values=(total.get(h['serial'], 0),))
-            self.tree_info[iid] = ('hdd', h['serial'])
-
-        def node_for(sv, parts, drive):
-            if not parts: return hnode[sv]
-            iid = nodes.get((sv, parts))
-            if iid: return iid
-            parent = node_for(sv, parts[:-1], drive)
-            iid = self.new_iid()
-            self.tr.insert(parent, 'end', iid=iid, text='📁  ' + parts[-1], values=('',))
-            nodes[(sv, parts)] = iid
-            self.tree_info[iid] = ('folder', drive + '\\'.join(parts) + '\\')
-            return iid
-
-        items = sorted(((self.parts_of(r['path']), r) for r in rows if r['serial'] in hnode),
-                       key=lambda t: (t[1]['serial'], [db.natural_key(p) for p in t[0]]))
-        for parts, r in items:
-            iid = node_for(r['serial'], parts, r['path'][:3])
-            if r['nfiles'] > 0:
-                self.tr.set(iid, 'n', r['nfiles']); self.lazy[iid] = r['id']
-                d = self.new_iid(); self.dummy[iid] = d
-                self.tr.insert(iid, 'end', iid=d, text='…')
-        if words and len(rows) <= 200:
-            for iid in list(hnode.values()) + list(nodes.values()):
-                self.tr.item(iid, open=True); self.load_files(iid)
-
-    def load_files(self, iid):
-        fid = self.lazy.pop(iid, None)
-        if fid is None: return
-        self.tr.delete(self.dummy.pop(iid))
-        words = db.norm(self.q.get()).split()
-        info = self.tree_info.get(iid)
-        base = info[1] if info and info[0] == 'folder' else ''
-        for r in self.con.execute("SELECT name,name_norm FROM file WHERE folder_id=? ORDER BY name_norm", (fid,)):
-            f = self.new_iid()
-            self.tr.insert(iid, 'end', iid=f, text='🎬  ' + r['name'], values=('',),
-                           tags=('hit',) if words and all(w in r['name_norm'] for w in words) else ())
-            self.tree_info[f] = ('file', base, r['name'])
-
-    def tree_menu(self, ev):
-        i = self.tr.identify_row(ev.y)
-        if i: self.tr.selection_set(i); self.tm.tk_popup(ev.x_root, ev.y_root)
-
-    def tree_path(self):
-        s = self.tr.selection(); info = self.tree_info.get(s[0]) if s else None
-        return info[1] if info and info[0] in ('folder', 'file') else None
-
-    def copy_tree_path(self):
-        s = self.tr.selection(); info = self.tree_info.get(s[0]) if s else None
-        if info and info[0] == 'file': self.to_clipboard(info[1] + info[2])
-        elif info and info[0] == 'folder': self.to_clipboard(info[1])
-
-    def open_tree_folder(self):
-        p = self.tree_path()
-        if p: self.open_path(p)
-
-    # ------------------------------------------------------------------ nạp / xóa data
-    def pdf_list(self):
-        try: names = [f for f in os.listdir(DATA_DIR) if f.lower().endswith('.pdf')]
-        except OSError: names = []
-        return [os.path.join(DATA_DIR, f) for f in sorted(names, key=db.natural_key)]
-
-    def update_data_info(self):
-        self.info.config(text=f'Data: {DATA_DIR}')
-        self.cards['pdf'][1].config(text=str(len(self.pdf_list())))
-
-    def open_data(self):
-        os.makedirs(DATA_DIR, exist_ok=True); self.open_path(DATA_DIR)
-
-    def set_busy(self, busy):
-        self.loading = busy
-        for b in (self.btn_load, self.btn_clear, self.btn_csv): b.config(state='disabled' if busy else 'normal')
-        if busy: self.prog.pack(side='right'); self.lb_prog.pack(side='right', padx=8)
-        else: self.prog.pack_forget(); self.lb_prog.pack_forget()
-
-    def load_data(self):
-        if self.loading: return
-        self.update_data_info(); pdfs = self.pdf_list()
-        if not pdfs:
-            if messagebox.askyesno('Chưa có file PDF', 'Thư mục Data chưa có file PDF nào.\n\nMở thư mục Data để bỏ file PDF vào?'):
-                self.open_data()
-            return
-        self.set_busy(True); self.prog.configure(maximum=len(pdfs), value=0)
-
+    # ------------------------------------------------------------------ quét ổ
+    def refresh_drives_async(self):
         def work():
-            results, errors = [], []
-            for i, p in enumerate(pdfs, 1):
-                stem = os.path.splitext(os.path.basename(p))[0]
-                self.msgs.put(('progress', (i - 1, len(pdfs), stem)))
-                try: results.append((stem, parse_text(db.read_pdf_text(p))))
-                except Exception as ex:
-                    errors.append((stem, str(ex)))
-                    if 'pypdf' in str(ex): break
-            self.msgs.put(('done', (results, errors, len(pdfs))))
+            try: d = drives.list_drives()
+            except Exception: d = []
+            self.msgs.put(('drives', d))
         threading.Thread(target=work, daemon=True).start()
 
+    def open_scan_dialog(self):
+        if self.scanning: return
+        ScanDialog(self, self.start_scan)
+
+    def rescan_selected(self):
+        if self.scanning: return
+        if not self.hid:
+            messagebox.showinfo('Quét lại', 'Hãy chọn một ổ HDD ở danh sách bên trái rồi bấm "Quét lại".'); return
+        h = self.hdd_row(self.hid); root = self.root_for(h)
+        if not root:
+            messagebox.showinfo('Ổ chưa cắm', f"Ổ {h['code']} · {h['name']} chưa cắm vào máy.\nCắm ổ rồi thử lại (hoặc dùng \"Quét ổ HDD\" để chọn lại)."); return
+        if not messagebox.askyesno('Quét lại ổ', f"Quét lại ổ {h['code']} · {h['name']}?\nDữ liệu cũ của ổ này sẽ được thay bằng kết quả quét mới (mã ổ giữ nguyên)."): return
+        d = drives.find_by_serial(self.drives, h['serial']) if h['serial'] else None
+        self.start_scan(root, h['name'], d, False, h['id'])
+
+    def start_scan(self, root, name, drive, media_only, replace_id):
+        if self.scanning: return
+        dlg = self.scanning = ScanProgress(self, name or root)
+        def work():
+            try:
+                r = scanner.scan_hdd(DB_PATH, root, name, drive, dlg.cancel_event,
+                                     lambda *a: self.msgs.put(('scan_progress', a)), media_only, replace_id)
+                self.msgs.put(('scan_done', r))
+            except scanner.Cancelled:
+                self.msgs.put(('scan_cancel', None))
+            except Exception as ex:
+                self.msgs.put(('scan_err', str(ex)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def scan_finished(self):
+        try: self.scanning.destroy()
+        except Exception: pass
+        self.scanning = None
+
+    # ------------------------------------------------------------------ hộp thư tín & vòng lặp
     def pump(self):
         try:
             while True:
                 kind, p = self.msgs.get_nowait()
-                if kind == 'progress':
-                    i, n, stem = p; self.prog.configure(value=i); self.lb_prog.config(text=f'{i}/{n}  {stem}')
-                    self.status.config(text=f'  Đang đọc {stem} …')
-                elif kind == 'done': self.load_done(*p)
+                if kind == 'scan_progress' and self.scanning: self.scanning.update_stats(*p)
+                elif kind == 'scan_done':
+                    self.scan_finished(); self.hid = p['hid']; self.drives = drives.list_drives(); self.refresh_all()
+                    messagebox.showinfo('Quét xong', f"Ổ {p['code']} · {p['name']}\n\n{p['files']:,} file • {p['folders']:,} thư mục • {fmt_size(p['bytes'])}\n"
+                                        f"Thời gian: {p['seconds']:.0f} giây" + (f"\nBỏ qua {p['errors']} mục không đọc được (không có quyền)." if p['errors'] else '')
+                                        + ('\n\nĐã thêm ổ mới vào thư viện.' if p['new'] else '\n\nĐã cập nhật dữ liệu mới của ổ.'))
+                elif kind == 'scan_cancel':
+                    self.scan_finished(); messagebox.showinfo('Đã hủy', 'Đã hủy quét. Thư viện giữ nguyên như cũ.')
+                elif kind == 'scan_err':
+                    self.scan_finished(); messagebox.showerror('Lỗi quét', f'Không quét được:\n{p}')
+                elif kind == 'drives': self.drives = p; self.refresh_stats(); self.refresh_sidebar()
                 elif kind == 'update_info': self.on_update_info(*p)
                 elif kind == 'dl': self.on_download_progress(*p)
                 elif kind == 'dl_done': self.on_download_done(*p)
         except queue.Empty:
             pass
-        self.after(120, self.pump)
+        self.after(100, self.pump)
 
-    def load_done(self, results, errors, total):
-        db.wipe_all(self.con); multi = []
-        for stem, parsed in results:
-            n = db.load_parsed(self.con, stem, parsed)
-            if n == 0: errors.append((stem, "Không nhận diện được nội dung (không phải bản in của Karen's Directory Printer?)"))
-            elif n > 1: multi.append((stem, n))
-        self.set_busy(False); self.load_hdds(); self.refresh()
-        msg = (f'Đã nạp {self.scalar("SELECT COUNT(*) FROM hdd")} HDD, {self.scalar("SELECT COUNT(*) FROM folder WHERE nfiles>0")} thư mục, '
-               f'{self.scalar("SELECT COUNT(*) FROM file")} file từ {total - len(errors)}/{total} file PDF.')
-        for stem, n in multi: msg += f'\n\n"{stem}.pdf" chứa {n} ổ nên đã tách theo nhãn ổ (nên để mỗi PDF 1 ổ).'
-        if errors:
-            msg += '\n\nLỗi:\n' + '\n'.join(f'- {s}: {e}' for s, e in errors[:8])
-            messagebox.showwarning('Nạp data xong (có lỗi)', msg)
-        else:
-            messagebox.showinfo('Nạp data xong', msg)
+    # ------------------------------------------------------------------ quản lý thư viện
+    def edit_selected(self):
+        if not self.hid: messagebox.showinfo('Sửa ổ', 'Hãy chọn một ổ HDD ở danh sách bên trái.'); return
+        h = self.hdd_row(self.hid)
+        EditHdd(self, h, lambda name, code: (L.rename_hdd(self.con, h['id'], name, code), self.refresh_all()))
 
-    def clear_data(self):
-        if self.loading: return
-        if self.scalar("SELECT COUNT(*) FROM hdd") == 0:
-            messagebox.showinfo('Xóa data', 'Chưa có dữ liệu nào để xóa.'); return
-        if messagebox.askyesno('Xóa data', 'Xóa toàn bộ dữ liệu đang nạp trong tool?\n(File PDF trong thư mục Data KHÔNG bị xóa)'):
-            db.wipe_all(self.con); self.load_hdds(); self.refresh()
+    def delete_selected(self):
+        if not self.hid: messagebox.showinfo('Xóa ổ', 'Hãy chọn một ổ HDD ở danh sách bên trái.'); return
+        h = self.hdd_row(self.hid)
+        if messagebox.askyesno('Xóa ổ khỏi thư viện', f"Xóa ổ {h['code']} · {h['name']} ({h['nfiles']:,} file) khỏi thư viện?\n(Không xóa gì trên ổ cứng thật.)"):
+            L.delete_hdd(self.con, h['id']); self.hid = None; self.refresh_all()
+
+    def wipe(self):
+        if not L.totals(self.con)['hdd']: messagebox.showinfo('Xóa thư viện', 'Thư viện đang trống.'); return
+        if messagebox.askyesno('Xóa toàn bộ thư viện', 'Xóa SẠCH toàn bộ thư viện (mọi ổ, thư mục, file đã quét)?\nKhông ảnh hưởng dữ liệu trên ổ cứng thật.\n\nNên sao lưu trước.', icon='warning'):
+            L.wipe_all(self.con); self.hid = None; self.refresh_all()
+
+    def backup(self):
+        p = filedialog.asksaveasfilename(defaultextension='.db', filetypes=[('Thư viện My Movie Library', '*.db')],
+                                         initialfile=f"MyMovieLibrary_{time.strftime('%Y%m%d')}.db")
+        if not p: return
+        dst = sqlite3.connect(p); self.con.backup(dst); dst.close(); messagebox.showinfo('Sao lưu', f'Đã sao lưu thư viện:\n{p}')
+
+    def restore(self):
+        p = filedialog.askopenfilename(filetypes=[('Thư viện My Movie Library', '*.db')], title='Chọn file sao lưu')
+        if not p: return
+        try:
+            src = sqlite3.connect(p); src.execute('SELECT COUNT(*) FROM hdd'); src.execute('SELECT COUNT(*) FROM file')
+        except sqlite3.DatabaseError:
+            messagebox.showerror('Khôi phục', 'File này không phải bản sao lưu của My Movie Library.'); return
+        if not messagebox.askyesno('Khôi phục', 'Thay toàn bộ thư viện hiện tại bằng bản sao lưu này?'): src.close(); return
+        src.backup(self.con); src.close(); self.con.executescript(L.SCHEMA); self.hid = None; self.refresh_all()
+        messagebox.showinfo('Khôi phục', 'Đã khôi phục thư viện.')
 
     def export_csv(self):
-        if not self.tv.get_children():
-            messagebox.showinfo('Xuất CSV', 'Không có dữ liệu để xuất.'); return
+        n = self.tab_name()
+        if n == 'folders':
+            total, rows = L.search_folders(self.con, self.q.get(), self.hid, *self.sort['folders'], None)
+            head = ['Mã thư mục', 'Tên thư mục', 'Mã ổ', 'Tên ổ', 'Đường dẫn trong ổ', 'Số file', 'Dung lượng (byte)']
+            data = [[r['code'], r['name'], r['hcode'], r['hname'], '\\' + r['path'], r['nfiles'], r['bytes']] for r in rows]
+        else:
+            total, rows = L.search_files(self.con, self.q.get(), self.kind_key(), self.hid, *self.sort['files'], None)
+            head = ['Mã file', 'Tên file', 'Đuôi', 'Loại', 'Dung lượng (byte)', 'Dung lượng', 'Ngày sửa', 'Mã thư mục', 'Mã ổ', 'Tên ổ', 'Đường dẫn trong ổ']
+            data = [[r['code'], r['name'], r['ext'], L.KINDS.get(r['kind'], ''), r['size'], fmt_size(r['size']), L.fmt_time(r['mtime']), r['fcode'],
+                     r['hcode'], r['hname'], '\\' + (r['path'] + '\\' if r['path'] else '') + r['name']] for r in rows]
+        if not data: messagebox.showinfo('Xuất CSV', 'Không có dữ liệu để xuất.'); return
         p = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')], initialfile='thu_vien_phim.csv')
         if not p: return
         with open(p, 'w', newline='', encoding='utf-8-sig') as f:
-            w = csv.writer(f); w.writerow(['Tên thư mục', 'HDD', 'Loại', 'Số file', 'Đường dẫn'])
-            for i in self.tv.get_children(): w.writerow(self.tv.item(i, 'values'))
-        messagebox.showinfo('Xong', 'Đã xuất danh sách đang hiển thị.')
+            w = csv.writer(f); w.writerow(head); w.writerows(data)
+        messagebox.showinfo('Xuất CSV', f'Đã xuất {len(data):,} dòng (kết quả đang lọc):\n{p}')
 
     # ------------------------------------------------------------------ update
     def check_update(self, silent):
@@ -477,18 +847,16 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def on_update_info(self, rel, err, silent):
-        self.btn_update.config(state='normal'); self.refresh()
+        self.btn_update.config(state='normal'); self.set_status_search(self.last_total)
         newer = bool(rel and updater.is_newer(rel['version']))
-        if newer:
-            self.new_release = rel; self.lb_new.config(text=f'● Có bản mới v{rel["version"]}')
+        if newer: self.new_release = rel; self.lb_new.config(text=f'● Có bản mới v{rel["version"]}')
         if silent: return
         if err: messagebox.showerror('Update', f'Không kiểm tra được bản mới (cần Internet):\n{err}'); return
         if rel is None: messagebox.showinfo('Update', f'Chưa có bản phát hành nào trên GitHub.\nBạn đang dùng v{APP_VERSION}.'); return
         if not newer: messagebox.showinfo('Update', f'Bạn đang dùng bản mới nhất (v{APP_VERSION}).'); return
         notes = (rel['notes'] or '').strip()[:700]
-        if not messagebox.askyesno('Có bản cập nhật', f'Có phiên bản mới v{rel["version"]} (hiện tại v{APP_VERSION}).\n\n{notes}\n\nCập nhật ngay?'):
-            return
-        self.start_download(rel)
+        if messagebox.askyesno('Có bản cập nhật', f'Có phiên bản mới v{rel["version"]} (hiện tại v{APP_VERSION}).\n\n{notes}\n\nCập nhật ngay? (Thư viện của bạn được giữ nguyên.)'):
+            self.start_download(rel)
 
     def start_download(self, rel):
         if FROZEN:
@@ -497,20 +865,18 @@ class App(tk.Tk):
         else:
             if not rel['zip_url']: webbrowser.open(rel['page']); return
             url, dest = rel['zip_url'], os.path.join(tempfile.gettempdir(), 'mml_source.zip')
-        self.set_busy(True); self.prog.configure(maximum=100, value=0); self.lb_prog.config(text='Đang tải bản cập nhật…')
+        self.status.config(text='  Đang tải bản cập nhật…')
         def work():
             try:
-                updater.download(url, dest, lambda g, t: self.msgs.put(('dl', (g, t))))
-                self.msgs.put(('dl_done', (dest, None)))
+                updater.download(url, dest, lambda g, t: self.msgs.put(('dl', (g, t)))); self.msgs.put(('dl_done', (dest, None)))
             except Exception as ex:
                 self.msgs.put(('dl_done', (dest, str(ex))))
         threading.Thread(target=work, daemon=True).start()
 
     def on_download_progress(self, got, total):
-        if total: self.prog.configure(value=got * 100 / total); self.lb_prog.config(text=f'Đang tải… {got // 1024:,}/{total // 1024:,} KB')
+        if total: self.status.config(text=f'  Đang tải bản cập nhật… {got * 100 // total}%  ({got // 1024:,}/{total // 1024:,} KB)')
 
     def on_download_done(self, path, err):
-        self.set_busy(False)
         if err: messagebox.showerror('Update', f'Tải bản cập nhật thất bại:\n{err}'); return
         try:
             if FROZEN:
@@ -523,14 +889,21 @@ class App(tk.Tk):
             messagebox.showerror('Update', f'Không áp dụng được bản cập nhật:\n{ex}')
 
     def about(self):
-        messagebox.showinfo('Giới thiệu', f'{APP_TITLE}\n\nQuản lý danh sách phim theo thư mục các ổ HDD,\nđọc từ bản in PDF của Karen\'s Directory Printer.\n\n'
-                            f'GitHub: github.com/{GITHUB_REPO}\nPhiên bản: {APP_VERSION}')
+        messagebox.showinfo('Giới thiệu', f'{APP_TITLE}\n\nQuét các ổ HDD, lưu thư mục / file vào thư viện có mã số\nvà tìm kiếm tức thì — kể cả khi ổ không cắm trong máy.\n\n'
+                            f'GitHub: github.com/{GITHUB_REPO}\nPhiên bản: {APP_VERSION}\nThư viện: {DB_PATH}')
 
     def on_close(self):
-        try: db.wipe_all(self.con); self.con.close()
+        if self.scanning and not messagebox.askyesno('Đang quét', 'Đang quét ổ đĩa. Hủy quét và thoát?'): return
+        if self.scanning: self.scanning.cancel_event.set()
+        try: self.con.close()
         except Exception: pass
         self.destroy()
 
 
 if __name__ == '__main__':
+    if sys.platform == 'win32':
+        try:
+            import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)      # chữ nét trên màn hình 4K / 125%-150%
+        except Exception:
+            pass
     App().mainloop()
