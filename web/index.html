@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Movie Library</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside class="side" id="side">
+  <div class="brand">
+    <div class="logo">M</div>
+    <div class="hide-mini"><b>MY MOVIE LIBRARY</b><small id="ver">v3.3 by Duy Anh</small></div>
+    <span class="fold" id="fold" title="Thu gọn / mở rộng">«</span>
+  </div>
+  <div class="menu-l hide-mini">MENU</div>
+  <div class="nav on" data-p="files"><span class="ic">⌕</span><span class="hide-mini">Tìm file</span><span class="led sm ok hide-mini"><i></i></span></div>
+  <div class="nav" data-p="folders"><span class="ic">▦</span><span class="hide-mini">Thư mục</span><span class="led sm ok hide-mini"><i></i></span></div>
+  <div class="nav" data-p="tree"><span class="ic">⌥</span><span class="hide-mini">Cây thư mục</span><span class="led sm ok hide-mini"><i></i></span></div>
+  <div class="nav" data-p="scan"><span class="ic">⬇</span><span class="hide-mini">Quét &amp; Sao lưu</span><span class="badge o hide-mini" id="bd-scan" hidden>●</span><span class="led sm ok hide-mini"><i></i></span></div>
+  <div class="nav" data-p="settings"><span class="ic">⚙</span><span class="hide-mini">Cài đặt</span><span class="led sm ok hide-mini"><i></i></span></div>
+  <div class="raised alert hide-mini" id="alert"><span class="led big ok" id="aled"><i></i></span>
+    <div><b id="a1">Đang đọc thư viện…</b><small id="a2"></small></div></div>
+  <div class="grow"></div>
+  <div class="panel hide-mini">
+    <h4>DANH SÁCH Ổ HDD</h4>
+    <div class="legend"><span><i style="background:#22c55e;color:#22c55e"></i>Đang cắm</span><span><i style="background:#ffc81a;color:#ffc81a"></i>Đang quét</span>
+      <span><i style="background:#b9c0c9;color:transparent"></i>Rút ra</span></div>
+    <div class="tiles" id="tiles"></div>
+  </div>
+</aside>
+
+<main class="main">
+  <div class="top">
+    <div><h1 id="ptitle">Tìm file</h1><div class="sub" id="psub"></div></div>
+    <div class="acts">
+      <button class="btn" id="bTheme">◐ Giao diện</button>
+      <button class="btn" id="bUpd">⟳ Cập nhật</button>
+      <button class="btn red shine" id="bScanNew">＋ Quét ổ HDD</button>
+    </div>
+  </div>
+
+  <!-- ===================== TÌM FILE ===================== -->
+  <section class="page on" id="pg-files">
+    <div class="stats">
+      <div class="stat" style="--c:#e2552a"><div class="l">Ổ HDD</div><div class="sq">▣</div><div class="n" id="s-hdd">0</div></div>
+      <div class="stat" style="--c:#2f7fa3"><div class="l">THƯ MỤC</div><div class="sq">▦</div><div class="n" id="s-fold">0</div></div>
+      <div class="stat" style="--c:#e2342a"><div class="l">FILE</div><div class="sq">●</div><div class="n" id="s-file">0</div></div>
+      <div class="stat" style="--c:#21964a"><div class="l">DUNG LƯỢNG</div><div class="sq">Σ</div><div class="n" id="s-size">0</div></div>
+    </div>
+    <div class="searchbar">
+      <input type="search" class="q" id="q" placeholder="Gõ tên phim, không cần dấu…  hoặc mã  H01-000123" autocomplete="off">
+      <select id="kind"><option value="">Tất cả loại</option><option value="video">Video</option><option value="audio">Audio</option>
+        <option value="sub">Phụ đề</option><option value="image">Ảnh</option><option value="other">Khác</option></select>
+      <button class="btn" id="bCsv">⇩ Xuất CSV</button>
+    </div>
+    <div class="syntax">Cú pháp: <code>ext:mkv</code> <code>&gt;1gb</code> <code>&lt;500mb</code> <code>hdd:H01</code> <code>kind:video</code> <code>"cụm từ"</code> · mã ổ <code>H01-</code> · mã thư mục <code>H01-D00012</code></div>
+    <div class="hacts" id="hacts" hidden>
+      <span class="hn" id="hname"></span>
+      <button class="btn sm" id="bRescan">⟳ Quét lại</button>
+      <button class="btn sm" id="bEdit">✎ Sửa tên / mã</button>
+      <button class="btn sm out" id="bDel">🗑 Xóa ổ khỏi thư viện</button>
+    </div>
+    <div class="tablewrap"><table id="tbl-f">
+      <thead><tr><th data-k="code">MÃ</th><th data-k="name">TÊN FILE</th><th data-k="kind">LOẠI</th><th data-k="size" class="num">DUNG LƯỢNG</th>
+        <th data-k="mtime">NGÀY SỬA</th><th data-k="hdd">Ổ</th><th data-k="folder">THƯ MỤC</th></tr></thead>
+      <tbody id="rows-f"></tbody></table></div>
+    <div class="detail empty-d" id="det-f">Chọn một dòng để xem chi tiết • nhấp đúp để mở thư mục chứa file (khi ổ đang cắm)</div>
+  </section>
+
+  <!-- ===================== THƯ MỤC ===================== -->
+  <section class="page" id="pg-folders">
+    <div class="searchbar">
+      <input type="search" class="q" id="q2" placeholder="Tìm thư mục (tên phim, không cần dấu)…" autocomplete="off">
+      <button class="btn" id="bCsv2">⇩ Xuất CSV</button>
+    </div>
+    <div class="tablewrap"><table id="tbl-d">
+      <thead><tr><th data-k="code">MÃ</th><th data-k="name">TÊN THƯ MỤC</th><th data-k="hdd">Ổ</th><th data-k="path">ĐƯỜNG DẪN TRONG Ổ</th>
+        <th data-k="files" class="num">FILE</th><th data-k="size" class="num">DUNG LƯỢNG</th></tr></thead>
+      <tbody id="rows-d"></tbody></table></div>
+    <div class="detail empty-d" id="det-d">Chọn một thư mục để xem chi tiết</div>
+  </section>
+
+  <!-- ===================== CÂY THƯ MỤC ===================== -->
+  <section class="page" id="pg-tree">
+    <div class="treewrap">
+      <div class="treebox" id="treebox"></div>
+      <div class="treeright">
+        <div class="fp-head"><h3 id="tr-title">Chọn một thư mục ở cây bên trái</h3><div class="info" id="tr-info"></div></div>
+        <div class="tablewrap"><table>
+          <thead><tr><th>MÃ</th><th>TÊN FILE</th><th class="num">DUNG LƯỢNG</th><th>NGÀY SỬA</th></tr></thead>
+          <tbody id="rows-t"></tbody></table></div>
+        <div class="detail empty-d" id="det-t">Chọn một file để xem chi tiết</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== QUÉT & SAO LƯU ===================== -->
+  <section class="page" id="pg-scan">
+    <div class="scangrid">
+      <div class="card">
+        <h4>1 · Chọn ổ đĩa cần quét</h4>
+        <div class="tablewrap" style="max-height:230px;margin-top:6px"><table class="dtable"><thead><tr><th>Ổ</th><th>NHÃN</th><th>LOẠI</th><th>HỆ TỆP</th><th class="num">DUNG LƯỢNG</th><th class="num">CÒN TRỐNG</th><th>THƯ VIỆN</th></tr></thead>
+          <tbody id="rows-dr"></tbody></table></div>
+        <div class="fr" style="margin-top:10px"><button class="btn sm" id="bPickDir">📁 Chọn thư mục khác…</button>
+          <button class="btn sm" id="bRefDr">⟳ Làm mới</button><span class="hint" style="margin:0" id="where"></span></div>
+      </div>
+      <div class="card">
+        <h4>2 · Tùy chọn</h4>
+        <div class="fr sm"><label>Tên ổ trong thư viện</label><input type="text" id="sc-name" placeholder="VD: 01 - PHIM LẺ"></div>
+        <div class="codeline" id="sc-code"></div>
+        <label class="ck"><input type="checkbox" id="sc-media"> Chỉ quét file media (video, audio, phụ đề)</label>
+        <label class="ck"><input type="checkbox" id="sc-bk"> ☁ Quét xong → sao lưu <b>library.db</b> lên PikPak</label>
+        <label class="ck"><input type="checkbox" id="sc-ej"> ⏏ Sau đó → ép tháo (eject) ổ vừa quét</label>
+        <div class="bigact"><button class="btn red shine" id="bGo" disabled>▶ Bắt đầu quét</button><button class="btn out" id="bStop" disabled>■ Dừng</button></div>
+      </div>
+    </div>
+    <div class="energy three">
+      <div class="k" style="color:#dc2626">⌕ QUÉT Ổ ĐĨA</div><div class="i" id="e-sc-i">—</div><div class="bar"><div class="b-red" id="e-sc"></div></div><div class="p" style="color:#dc2626" id="e-sc-p">0%</div>
+      <div class="k" style="color:#2f7fa3">☁ PIKPAK</div><div class="i" id="e-bk-i">—</div><div class="bar"><div class="b-blue" id="e-bk"></div></div><div class="p" style="color:#2f7fa3" id="e-bk-p">0%</div>
+      <div class="k" style="color:#16a34a">⏏ THÁO Ổ</div><div class="i" id="e-ej-i">—</div><div class="bar"><div class="b-green" id="e-ej"></div></div><div class="p" style="color:#16a34a" id="e-ej-p">0%</div>
+    </div>
+    <div class="logl">Nhật ký</div>
+    <div class="crt"><div class="log" id="log" style="height:190px"></div></div>
+  </section>
+
+  <!-- ===================== CÀI ĐẶT ===================== -->
+  <section class="page" id="pg-settings">
+    <div class="sets">
+      <div class="sec"><h4>PikPak (rclone)</h4>
+        <div class="d">Sau mỗi lần quét, tool đẩy <b>Data/library.db</b> lên PikPak: <span class="mono" id="bk-path"></span>. rclone tự tải về cạnh app nếu chưa có.</div>
+        <div class="readout"><div class="rows"><b>rclone</b><span id="rc-path">—</span><b>Trạng thái</b><span id="rc-state">—</span></div></div>
+        <div class="fr sm" style="margin-top:10px"><label>Email PikPak</label><input type="text" id="rc-user" autocomplete="off"></div>
+        <div class="fr sm"><label>Mật khẩu</label><input type="password" id="rc-pw" autocomplete="off"></div>
+        <div class="fr"><button class="btn red" id="bRcLogin">Đăng nhập</button><button class="btn" id="bRcOut">Đăng xuất</button>
+          <button class="btn" id="bBkNow">☁ Sao lưu lên PikPak ngay</button><span class="hint" style="margin:0" id="rc-msg"></span></div>
+        <div class="hint" style="margin-left:0">Mật khẩu chỉ lưu (dạng mã hóa của rclone) trong Data/rclone.conf trên máy này, không đưa lên GitHub.</div>
+      </div>
+      <div class="sec"><h4>Thư viện</h4>
+        <div class="d">Thư viện nằm trong <span class="mono" id="db-path"></span></div>
+        <div class="fr"><button class="btn" id="bBkFile">Sao lưu ra file…</button><button class="btn" id="bRestore">Khôi phục từ file…</button>
+          <button class="btn" id="bOpenData">📂 Mở thư mục Data</button><button class="btn out" id="bWipe">🗑 Xóa toàn bộ thư viện…</button></div>
+      </div>
+      <div class="sec"><h4>Giới thiệu &amp; cập nhật</h4>
+        <div class="d" id="about"></div>
+        <div class="fr"><button class="btn" id="bUpd2">⟳ Kiểm tra bản mới</button><button class="btn" id="bRepo">GitHub</button></div>
+        <div class="upd-bar" id="upd-bar" hidden><div></div></div><div class="hint" style="margin-left:0" id="upd-msg"></div>
+      </div>
+    </div>
+  </section>
+  <div class="foot"><span id="status">Sẵn sàng.</span></div>
+</main>
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

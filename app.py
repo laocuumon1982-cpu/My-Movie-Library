@@ -1006,10 +1006,15 @@ class App(tk.Tk):
         self.destroy()
 
 
-if __name__ == '__main__':
+def run_tk():
+    """Giao diện Tk (dự phòng khi máy không chạy được giao diện web)."""
     if sys.platform == 'win32':
         try:
             import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)      # chữ nét trên màn hình 4K / 125%-150%
         except Exception:
             pass
     App().mainloop()
+
+
+if __name__ == '__main__':
+    run_tk()

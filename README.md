@@ -25,10 +25,14 @@ Vào [Releases](../../releases): `My Movie Library.exe` hoặc `My-Movie-Library
 Python 3.9+ (không cần cài thêm thư viện): `python app.py` hoặc `Chay_App.bat`. Build exe: `build.bat`.
 Phát hành bản mới: sửa `APP_VERSION` trong `version.py` rồi push lên `main` — GitHub Actions tự build và đăng Release `vX.Y.Z`.
 
+## Giao diện mới (v3.3)
+
+Giao diện web (pywebview / Edge WebView2 có sẵn trong Windows 10/11) cùng phong cách **PikPak Auto Save**: thanh bên có phím nổi và đèn LED trạng thái từng ổ HDD, nút 3D, ống tiến độ, nhật ký kiểu màn hình CRT, giao diện sáng / tối. Máy nào không chạy được giao diện web thì tool tự dùng giao diện cũ (Tk).
+
 ## Sao lưu PikPak (rclone) + tháo ổ sau khi quét (v3.2)
 
 Sau mỗi lần quét xong, tool tự:
-1. **Sao lưu** `Data/library.db` lên PikPak: `2026/_Backup My Movie Library/library.db` (ghi đè bản cũ) bằng **rclone**. Không cần RaiDrive. rclone tự tải về thư mục `rclone\` cạnh app nếu chưa có. Đăng nhập một lần ở **⋯ Thêm → Đăng nhập rclone PikPak…** (mật khẩu lưu dạng mã hóa trong `Data/rclone.conf`).
+1. **Sao lưu** `Data/library.db` lên PikPak: `My Pack/2026/_Backup My Movie Library/library.db` (ghi đè bản cũ) bằng **rclone**. Không cần RaiDrive. rclone tự tải về thư mục `rclone\` cạnh app nếu chưa có. Đăng nhập một lần ở **⋯ Thêm → Đăng nhập rclone PikPak…** (mật khẩu lưu dạng mã hóa trong `Data/rclone.conf`).
 2. **Ép tháo ổ HDD** vừa quét: Explorer Eject → "Safely Remove Hardware" (cả ổ USB hiện là ổ cố định) → ép ngắt volume → đưa đĩa offline (cần Admin). Không tháo ổ hệ thống, ổ mạng, ổ chứa tool/thư viện, hoặc khi chỉ quét một thư mục con.
 
 Hai việc này bật/tắt bằng 2 ô tick trong hộp thoại quét. **⋯ Thêm → Sao lưu thư viện lên PikPak ngay** để sao lưu thủ công.

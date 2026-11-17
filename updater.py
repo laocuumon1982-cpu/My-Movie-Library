@@ -4,7 +4,8 @@ from version import APP_VERSION, GITHUB_REPO
 
 UA = {'User-Agent': 'MyMovieLibrary-Updater', 'Accept': 'application/vnd.github+json'}
 FROZEN = getattr(sys, 'frozen', False)
-SOURCE_FILES = ('app.py', 'library.py', 'scanner.py', 'drives.py', 'postscan.py', 'updater.py', 'version.py')
+SOURCE_FILES = ('mml.py', 'app.py', 'webapp.py', 'library.py', 'scanner.py', 'drives.py', 'postscan.py', 'updater.py', 'version.py')
+WEB_FILES = ('index.html', 'style.css', 'app.js')
 
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v or '')[:4]) or (0,)
@@ -56,4 +57,8 @@ def apply_source_update(zip_path, app_dir):
             if base in SOURCE_FILES and n.count('/') == 1:
                 with z.open(n) as s, open(os.path.join(app_dir, base), 'wb') as d: shutil.copyfileobj(s, d)
                 done.append(base)
+            elif base in WEB_FILES and n.count('/') == 2 and n.split('/')[1] == 'web':
+                os.makedirs(os.path.join(app_dir, 'web'), exist_ok=True)
+                with z.open(n) as s, open(os.path.join(app_dir, 'web', base), 'wb') as d: shutil.copyfileobj(s, d)
+                done.append('web/' + base)
     return done

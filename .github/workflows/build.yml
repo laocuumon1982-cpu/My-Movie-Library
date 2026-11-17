@@ -18,12 +18,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install
-        run: pip install pyinstaller
+        run: pip install pywebview pyinstaller
       - name: Build exe
         run: >
-          pyinstaller --noconfirm --onefile --windowed
+          python -m PyInstaller --noconfirm --clean --onefile --noconsole
           --name "My Movie Library" --icon icon.ico
-          --add-data "icon.ico;." app.py
+          --add-data "icon.ico;." --add-data "web;web"
+          --hidden-import webapp --hidden-import app
+          --collect-all webview --collect-all pythonnet --collect-all clr_loader mml.py
       - name: Portable package
         shell: pwsh
         run: |

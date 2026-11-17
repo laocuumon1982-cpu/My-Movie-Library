@@ -2,7 +2,7 @@
 import os, sys, time, shutil, sqlite3, subprocess, zipfile, tempfile, urllib.request
 
 REMOTE = 'pikpak'
-BACKUP_DIR = '2026/_Backup My Movie Library'
+BACKUP_DIR = 'My Pack/2026/_Backup My Movie Library'
 BACKUP_NAME = 'library.db'
 RCLONE_URL = 'https://downloads.rclone.org/rclone-current-windows-amd64.zip'
 NOWIN = 0x08000000 if sys.platform == 'win32' else 0

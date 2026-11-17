@@ -7,3 +7,8 @@ MY MOVIE LIBRARY v3.0 by Duy Anh - BAN PORTABLE (khong can cai dat)
 3. Tim kiem tuc thi (go khong dau): ten phim | ext:mkv | >1gb | hdd:H01 | ma file/thu muc.
    Rut o ra van tim duoc - thu vien luu san trong thu muc Data\library.db.
 4. Quet lai o (khi them/xoa phim): chon o -> "Quet lai". Nut "Update" tu cap nhat ban moi tu GitHub.
+
+
+SAO LUU PIKPAK + THAO O (v3.3): Cai dat -> PikPak (rclone) -> dang nhap 1 lan. Sau moi lan quet, tool day Data\library.db len PikPak:
+   My Pack/2026/_Backup My Movie Library/library.db  roi ep thao (eject) o HDD vua quet. rclone tu tai ve canh app neu chua co.
+   Giao dien moi can Edge WebView2 (co san trong Windows 10/11); neu khong co, tool tu dung giao dien cu.
