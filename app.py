@@ -3,7 +3,7 @@ Chọn ổ HDD -> quét toàn bộ thư mục / thư mục con / tên file -> l�
 import os, sys, csv, json, queue, shutil, sqlite3, threading, subprocess, tempfile, time, webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import library as L, scanner, drives, updater
+import library as L, scanner, drives, updater, postscan
 from drives import fmt_size
 from version import APP_TITLE, APP_VERSION, APP_AUTHOR, GITHUB_REPO
 
@@ -154,6 +154,9 @@ class ScanDialog(Modal):
         self.code_lb = self.label(form, '', 10, True); self.code_lb.grid(row=0, column=2, sticky='w')
         self.media = tk.BooleanVar(value=False)
         ttk.Checkbutton(body, text='Chỉ quét file media (video, audio, phụ đề) — bỏ qua file khác', variable=self.media).pack(anchor='w', pady=(10, 0))
+        self.bk = tk.BooleanVar(value=app.settings.get('backup_on', True)); self.ej = tk.BooleanVar(value=app.settings.get('eject_on', True))
+        ttk.Checkbutton(body, text='Quét xong → sao lưu Data/library.db lên PikPak (2026/_Backup My Movie Library)', variable=self.bk).pack(anchor='w', pady=(4, 0))
+        ttk.Checkbutton(body, text='Sau đó → ép tháo (eject) ổ HDD vừa quét (chỉ khi quét cả ổ, không áp dụng ổ hệ thống / ổ chứa tool)', variable=self.ej).pack(anchor='w', pady=(4, 0))
         self.where = self.label(body, '', 9, muted=True); self.where.pack(anchor='w', pady=(6, 0))
         bar = tk.Frame(body, bg=C['bg']); bar.pack(side='bottom', fill='x', pady=(10, 0))
         ttk.Button(bar, text='Đóng', style='Ghost.TButton', command=self.destroy).pack(side='right')
@@ -205,7 +208,9 @@ class ScanDialog(Modal):
         if drive and drive.get('system') and not messagebox.askyesno(
                 'Ổ hệ thống', f"{drive['letter']} là ổ hệ thống (Windows), quét sẽ rất lâu và nhiều file không liên quan.\nVẫn quét?", parent=self):
             return
-        name = self.name.get().strip(); media = self.media.get(); self.destroy()
+        name = self.name.get().strip(); media = self.media.get()
+        self.app.settings['backup_on'] = bool(self.bk.get()); self.app.settings['eject_on'] = bool(self.ej.get()); save_settings(self.app.settings)
+        self.destroy()
         self.on_start(root, name, drive, media, None)
 
 
@@ -287,6 +292,8 @@ class App(tk.Tk):
         self.more.add_command(label='Sao lưu thư viện…', command=self.backup)
         self.more.add_command(label='Khôi phục thư viện từ bản sao lưu…', command=self.restore)
         self.more.add_command(label='Mở thư mục chứa thư viện', command=lambda: self.open_path(DATA_DIR))
+        self.more.add_command(label='Chọn thư mục sao lưu PikPak…', command=self.pick_backup_dir)
+        self.more.add_command(label='Sao lưu thư viện lên PikPak ngay', command=self.backup_now)
         self.more.add_separator(); self.more.add_command(label='Xóa toàn bộ thư viện…', command=self.wipe)
         self.btn_csv = ttk.Button(tb, text='⇩  Xuất CSV', style='Ghost.TButton', command=self.export_csv)
         self.btn_more.pack(side='right'); self.btn_csv.pack(side='right', padx=8)
@@ -742,9 +749,53 @@ class App(tk.Tk):
         d = drives.find_by_serial(self.drives, h['serial']) if h['serial'] else None
         self.start_scan(root, h['name'], d, False, h['id'])
 
+    def pick_backup_dir(self):
+        cur = self.settings.get('pikpak_dir', '')
+        p = filedialog.askdirectory(parent=self, title='Chọn thư mục sao lưu trên PikPak (ổ RaiDrive) — ví dụ P:\\2026\\_Backup My Movie Library',
+                                    initialdir=cur or None)
+        if not p: return
+        self.settings['pikpak_dir'] = os.path.normpath(p); save_settings(self.settings)
+        messagebox.showinfo('Sao lưu PikPak', f'Sẽ sao lưu library.db vào:\n{os.path.normpath(p)}')
+
+    def backup_now(self):
+        if not os.path.exists(DB_PATH): return
+        def work():
+            try:
+                d, why = postscan.find_backup_dir(drives.list_drives(), self.settings.get('pikpak_dir', ''))
+                if not d: self.msgs.put(('info', ('Sao lưu PikPak', why))); return
+                f = postscan.backup_db(DB_PATH, d)
+                self.msgs.put(('info', ('Sao lưu PikPak', f'Đã sao lưu lên PikPak:\n{f}')))
+            except Exception as ex:
+                self.msgs.put(('info', ('Sao lưu PikPak', f'Sao lưu thất bại:\n{ex}')))
+        threading.Thread(target=work, daemon=True).start()
+
+    def post_scan(self, r, root, drive):
+        """Chạy nền sau khi quét xong: sao lưu PikPak rồi eject ổ. Gửi kết quả về hộp thư 'post_done'."""
+        do_bk = self.settings.get('backup_on', True); do_ej = self.settings.get('eject_on', True)
+        if not (do_bk or do_ej): self.msgs.put(('post_done', (r, []))); return
+        lines = []
+        def work():
+            if do_bk:
+                try:
+                    d, why = postscan.find_backup_dir(drives.list_drives(), self.settings.get('pikpak_dir', ''))
+                    if not d: lines.append('☁ Sao lưu PikPak: bỏ qua — ' + why)
+                    else: lines.append('☁ Đã sao lưu library.db lên PikPak:\n    ' + postscan.backup_db(DB_PATH, d))
+                except Exception as ex:
+                    lines.append(f'☁ Sao lưu PikPak THẤT BẠI: {ex}')
+            if do_ej:
+                why = postscan.eject_blockers(root, drive, [DATA_DIR, DB_PATH, os.path.abspath(sys.argv[0]), sys.executable])
+                if why: lines.append(f'⏏ Không tháo ổ: {why}')
+                else:
+                    try: ok, msg = postscan.eject_drive(drive['letter'], force=True)
+                    except Exception as ex: ok, msg = False, str(ex)
+                    lines.append(('⏏ ' if ok else '⏏ KHÔNG tháo được — ') + msg)
+            self.msgs.put(('post_done', (r, lines)))
+        threading.Thread(target=work, daemon=True).start()
+
     def start_scan(self, root, name, drive, media_only, replace_id):
         if self.scanning: return
         dlg = self.scanning = ScanProgress(self, name or root)
+        self.last_scan = (root, drive)
         def work():
             try:
                 r = scanner.scan_hdd(DB_PATH, root, name, drive, dlg.cancel_event,
@@ -769,9 +820,16 @@ class App(tk.Tk):
                 if kind == 'scan_progress' and self.scanning: self.scanning.update_stats(*p)
                 elif kind == 'scan_done':
                     self.scan_finished(); self.hid = p['hid']; self.drives = drives.list_drives(); self.refresh_all()
-                    messagebox.showinfo('Quét xong', f"Ổ {p['code']} · {p['name']}\n\n{p['files']:,} file • {p['folders']:,} thư mục • {fmt_size(p['bytes'])}\n"
-                                        f"Thời gian: {p['seconds']:.0f} giây" + (f"\nBỏ qua {p['errors']} mục không đọc được (không có quyền)." if p['errors'] else '')
-                                        + ('\n\nĐã thêm ổ mới vào thư viện.' if p['new'] else '\n\nĐã cập nhật dữ liệu mới của ổ.'))
+                    root, drive = getattr(self, 'last_scan', (None, None))
+                    self.post_scan(p, root, drive)
+                elif kind == 'post_done':
+                    r, lines = p
+                    messagebox.showinfo('Quét xong', f"Ổ {r['code']} · {r['name']}\n\n{r['files']:,} file • {r['folders']:,} thư mục • {fmt_size(r['bytes'])}\n"
+                                        f"Thời gian: {r['seconds']:.0f} giây" + (f"\nBỏ qua {r['errors']} mục không đọc được (không có quyền)." if r['errors'] else '')
+                                        + ('\n\nĐã thêm ổ mới vào thư viện.' if r['new'] else '\n\nĐã cập nhật dữ liệu mới của ổ.')
+                                        + ('\n\n' + '\n'.join(lines) if lines else ''))
+                    self.drives = drives.list_drives(); self.refresh_stats(); self.refresh_sidebar()
+                elif kind == 'info': messagebox.showinfo(*p)
                 elif kind == 'scan_cancel':
                     self.scan_finished(); messagebox.showinfo('Đã hủy', 'Đã hủy quét. Thư viện giữ nguyên như cũ.')
                 elif kind == 'scan_err':

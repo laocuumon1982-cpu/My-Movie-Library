@@ -24,3 +24,11 @@ Vào [Releases](../../releases): `My Movie Library.exe` hoặc `My-Movie-Library
 ## Chạy từ mã nguồn
 Python 3.9+ (không cần cài thêm thư viện): `python app.py` hoặc `Chay_App.bat`. Build exe: `build.bat`.
 Phát hành bản mới: sửa `APP_VERSION` trong `version.py` rồi push lên `main` — GitHub Actions tự build và đăng Release `vX.Y.Z`.
+
+## Sao lưu PikPak + tháo ổ sau khi quét (v3.1)
+
+Sau mỗi lần quét xong, tool tự:
+1. **Sao lưu** `Data/library.db` lên PikPak: `2026/_Backup My Movie Library/library.db` (ghi đè bản cũ). PikPak phải được gắn thành ổ đĩa bằng **RaiDrive**; tool tự tìm ổ có nhãn "PikPak" (hoặc chọn tay ở menu **⋯ Thêm → Chọn thư mục sao lưu PikPak…**).
+2. **Ép tháo (eject)** ổ HDD vừa quét. Chỉ tháo khi quét cả ổ; không bao giờ tháo ổ hệ thống, ổ mạng hoặc ổ đang chứa tool / thư viện.
+
+Hai việc này bật/tắt bằng 2 ô tick trong hộp thoại "Chọn ổ HDD để quét". Menu **⋯ Thêm → Sao lưu thư viện lên PikPak ngay** để sao lưu thủ công.
