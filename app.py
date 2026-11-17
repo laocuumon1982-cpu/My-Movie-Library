@@ -155,7 +155,7 @@ class ScanDialog(Modal):
         self.media = tk.BooleanVar(value=False)
         ttk.Checkbutton(body, text='Chỉ quét file media (video, audio, phụ đề) — bỏ qua file khác', variable=self.media).pack(anchor='w', pady=(10, 0))
         self.bk = tk.BooleanVar(value=app.settings.get('backup_on', True)); self.ej = tk.BooleanVar(value=app.settings.get('eject_on', True))
-        ttk.Checkbutton(body, text='Quét xong → sao lưu Data/library.db lên PikPak (2026/_Backup My Movie Library)', variable=self.bk).pack(anchor='w', pady=(4, 0))
+        ttk.Checkbutton(body, text='Quét xong → sao lưu Data/library.db lên PikPak bằng rclone (2026/_Backup My Movie Library)', variable=self.bk).pack(anchor='w', pady=(4, 0))
         ttk.Checkbutton(body, text='Sau đó → ép tháo (eject) ổ HDD vừa quét (chỉ khi quét cả ổ, không áp dụng ổ hệ thống / ổ chứa tool)', variable=self.ej).pack(anchor='w', pady=(4, 0))
         self.where = self.label(body, '', 9, muted=True); self.where.pack(anchor='w', pady=(6, 0))
         bar = tk.Frame(body, bg=C['bg']); bar.pack(side='bottom', fill='x', pady=(10, 0))
@@ -212,6 +212,65 @@ class ScanDialog(Modal):
         self.app.settings['backup_on'] = bool(self.bk.get()); self.app.settings['eject_on'] = bool(self.ej.get()); save_settings(self.app.settings)
         self.destroy()
         self.on_start(root, name, drive, media, None)
+
+
+class RcloneLogin(Modal):
+    """Đăng nhập PikPak cho rclone (tự tải rclone về cạnh app nếu chưa có)."""
+
+    def __init__(self, app):
+        super().__init__(app, 'Đăng nhập rclone PikPak', 560, 400)
+        C = self.C; body = tk.Frame(self, bg=C['bg']); body.pack(fill='both', expand=True, padx=22, pady=18)
+        self.label(body, 'Đăng nhập PikPak (rclone)', 14, True).pack(anchor='w')
+        self.rc = postscan.find_rclone(DATA_DIR)
+        self.state = self.label(body, '', 9, muted=True, justify='left', wraplength=app.px(500)); self.state.pack(anchor='w', pady=(4, 10))
+        g = tk.Frame(body, bg=C['bg']); g.pack(fill='x')
+        self.email = tk.StringVar(value=app.settings.get('pikpak_user', '')); self.pw = tk.StringVar()
+        self.label(g, 'Email PikPak:').grid(row=0, column=0, sticky='w', pady=4)
+        ttk.Entry(g, textvariable=self.email, width=38, style='Search.TEntry').grid(row=0, column=1, padx=10, ipady=3)
+        self.label(g, 'Mật khẩu:').grid(row=1, column=0, sticky='w', pady=4)
+        ttk.Entry(g, textvariable=self.pw, width=38, show='•', style='Search.TEntry').grid(row=1, column=1, padx=10, ipady=3)
+        self.label(body, 'Mật khẩu chỉ lưu (dạng mã hóa của rclone) trong Data/rclone.conf trên máy này, không đưa lên GitHub.', 9, muted=True,
+                   wraplength=app.px(500), justify='left').pack(anchor='w', pady=(8, 0))
+        self.msg = self.label(body, '', 9, wraplength=app.px(500), justify='left'); self.msg.pack(anchor='w', pady=(8, 0))
+        bar = tk.Frame(body, bg=C['bg']); bar.pack(side='bottom', fill='x')
+        ttk.Button(bar, text='Đóng', style='Ghost.TButton', command=self.destroy).pack(side='right')
+        self.go = ttk.Button(bar, text='Đăng nhập', style='Accent.TButton', command=self.do_login); self.go.pack(side='right', padx=8)
+        self.out = ttk.Button(bar, text='Đăng xuất', style='Ghost.TButton', command=self.do_logout); self.out.pack(side='left')
+        self.refresh()
+
+    def refresh(self):
+        on = postscan.is_logged_in(self.rc, DATA_DIR)
+        self.state.config(text=(f'rclone: {self.rc}' if self.rc else 'rclone: chưa có — sẽ tự tải về thư mục app khi bấm Đăng nhập')
+                          + '\nTrạng thái: ' + ('ĐÃ đăng nhập PikPak ✔' if on else 'chưa đăng nhập'))
+        self.out.config(state='normal' if on else 'disabled')
+
+    def do_login(self):
+        em, pw = self.email.get().strip(), self.pw.get()
+        if not em or not pw: self.msg.config(text='Nhập email và mật khẩu PikPak.', fg=self.C['warn']); return
+        self.go.config(state='disabled'); self.msg.config(text='Đang xử lý… (lần đầu sẽ tải rclone ~20 MB)', fg=self.C['muted'])
+        self.result = None
+        def work():
+            try:
+                rc = self.rc or postscan.find_rclone(DATA_DIR) or postscan.download_rclone(DATA_DIR)
+                postscan.login(rc, DATA_DIR, em, pw); self.result = (rc, em, None)
+            except Exception as ex:
+                self.result = (None, em, str(ex))
+        threading.Thread(target=work, daemon=True).start(); self.after(150, self.poll)
+
+    def poll(self):
+        if not self.winfo_exists(): return
+        if self.result is None: self.after(150, self.poll); return
+        self.done(*self.result)
+
+    def done(self, rc, em, err):
+        if not self.winfo_exists(): return
+        self.go.config(state='normal')
+        if err: self.msg.config(text='Lỗi: ' + err, fg=self.C['err'] if 'err' in self.C else self.C['warn']); return
+        self.rc = rc; self.app.settings['pikpak_user'] = em; save_settings(self.app.settings)
+        self.pw.set(''); self.msg.config(text='Đăng nhập thành công. Từ giờ sau mỗi lần quét sẽ tự sao lưu lên PikPak.', fg=self.C['ok']); self.refresh()
+
+    def do_logout(self):
+        postscan.logout(self.rc, DATA_DIR); self.msg.config(text='Đã đăng xuất PikPak.', fg=self.C['muted']); self.refresh()
 
 
 class EditHdd(Modal):
@@ -292,7 +351,7 @@ class App(tk.Tk):
         self.more.add_command(label='Sao lưu thư viện…', command=self.backup)
         self.more.add_command(label='Khôi phục thư viện từ bản sao lưu…', command=self.restore)
         self.more.add_command(label='Mở thư mục chứa thư viện', command=lambda: self.open_path(DATA_DIR))
-        self.more.add_command(label='Chọn thư mục sao lưu PikPak…', command=self.pick_backup_dir)
+        self.more.add_command(label='Đăng nhập rclone PikPak…', command=lambda: RcloneLogin(self))
         self.more.add_command(label='Sao lưu thư viện lên PikPak ngay', command=self.backup_now)
         self.more.add_separator(); self.more.add_command(label='Xóa toàn bộ thư viện…', command=self.wipe)
         self.btn_csv = ttk.Button(tb, text='⇩  Xuất CSV', style='Ghost.TButton', command=self.export_csv)
@@ -749,25 +808,20 @@ class App(tk.Tk):
         d = drives.find_by_serial(self.drives, h['serial']) if h['serial'] else None
         self.start_scan(root, h['name'], d, False, h['id'])
 
-    def pick_backup_dir(self):
-        cur = self.settings.get('pikpak_dir', '')
-        p = filedialog.askdirectory(parent=self, title='Chọn thư mục sao lưu trên PikPak (ổ RaiDrive) — ví dụ P:\\2026\\_Backup My Movie Library',
-                                    initialdir=cur or None)
-        if not p: return
-        self.settings['pikpak_dir'] = os.path.normpath(p); save_settings(self.settings)
-        messagebox.showinfo('Sao lưu PikPak', f'Sẽ sao lưu library.db vào:\n{os.path.normpath(p)}')
+    def pikpak_backup(self):
+        """Chạy trong luồng nền. Trả về dòng thông báo kết quả."""
+        rc = postscan.find_rclone(DATA_DIR)
+        if not rc:
+            try: rc = postscan.download_rclone(DATA_DIR)
+            except Exception as ex: return f'☁ Sao lưu PikPak: chưa có rclone và tải không được ({ex}). Vào "⋯ Thêm → Đăng nhập rclone PikPak…".'
+        if not postscan.is_logged_in(rc, DATA_DIR):
+            return '☁ Sao lưu PikPak: bỏ qua — chưa đăng nhập. Vào "⋯ Thêm → Đăng nhập rclone PikPak…" một lần.'
+        try: return '☁ Đã sao lưu library.db lên PikPak:\n    ' + postscan.backup_db(DB_PATH, DATA_DIR, rc)
+        except Exception as ex: return f'☁ Sao lưu PikPak THẤT BẠI: {ex}'
 
     def backup_now(self):
         if not os.path.exists(DB_PATH): return
-        def work():
-            try:
-                d, why = postscan.find_backup_dir(drives.list_drives(), self.settings.get('pikpak_dir', ''))
-                if not d: self.msgs.put(('info', ('Sao lưu PikPak', why))); return
-                f = postscan.backup_db(DB_PATH, d)
-                self.msgs.put(('info', ('Sao lưu PikPak', f'Đã sao lưu lên PikPak:\n{f}')))
-            except Exception as ex:
-                self.msgs.put(('info', ('Sao lưu PikPak', f'Sao lưu thất bại:\n{ex}')))
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=lambda: self.msgs.put(('info', ('Sao lưu PikPak', self.pikpak_backup()))), daemon=True).start()
 
     def post_scan(self, r, root, drive):
         """Chạy nền sau khi quét xong: sao lưu PikPak rồi eject ổ. Gửi kết quả về hộp thư 'post_done'."""
@@ -775,13 +829,7 @@ class App(tk.Tk):
         if not (do_bk or do_ej): self.msgs.put(('post_done', (r, []))); return
         lines = []
         def work():
-            if do_bk:
-                try:
-                    d, why = postscan.find_backup_dir(drives.list_drives(), self.settings.get('pikpak_dir', ''))
-                    if not d: lines.append('☁ Sao lưu PikPak: bỏ qua — ' + why)
-                    else: lines.append('☁ Đã sao lưu library.db lên PikPak:\n    ' + postscan.backup_db(DB_PATH, d))
-                except Exception as ex:
-                    lines.append(f'☁ Sao lưu PikPak THẤT BẠI: {ex}')
+            if do_bk: lines.append(self.pikpak_backup())
             if do_ej:
                 why = postscan.eject_blockers(root, drive, [DATA_DIR, DB_PATH, os.path.abspath(sys.argv[0]), sys.executable])
                 if why: lines.append(f'⏏ Không tháo ổ: {why}')
