@@ -37,16 +37,31 @@ def download(url, dest, cb=None, timeout=30):
             f.write(b); got += len(b)
             if cb: cb(got, total)
 
+PYI_VARS = ('_MEIPASS2', '_PYI_APPLICATION_HOME_DIR', '_PYI_ARCHIVE_FILE', '_PYI_PARENT_PROCESS_LEVEL', '_PYI_SPLASH_IPC')
+
+
+def clean_env():
+    """Môi trường sạch cho tiến trình con: bỏ biến của PyInstaller (nếu không, bản mới dùng lại thư mục _MEI của bản cũ -> lỗi 'Failed to load Python DLL')."""
+    env = dict(os.environ)
+    for k in PYI_VARS: env.pop(k, None)
+    env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+    return env
+
+
 def apply_exe_update(new_exe, app_dir):
-    """Ghi file .bat: đợi tool thoát -> thay file .exe -> mở lại. Gọi xong thì app phải thoát."""
+    """Ghi file .bat: đợi tool thoát hẳn -> thay file .exe -> đợi bản cũ dọn thư mục tạm -> mở lại bằng môi trường sạch.
+    Gọi xong thì app phải thoát. (Dùng ping để chờ, vì 'timeout' không chạy được khi cmd chạy ngầm không có console.)"""
     cur = sys.executable
     bat = os.path.join(tempfile.gettempdir(), 'mml_update.bat')
     with open(bat, 'w', encoding='mbcs', errors='replace') as f:
-        f.write('@echo off\r\nset n=0\r\n:retry\r\ntimeout /t 1 /nobreak >nul\r\n'
+        f.write('@echo off\r\n'
+                + ''.join(f'set "{k}="\r\n' for k in PYI_VARS) + 'set "PYINSTALLER_RESET_ENVIRONMENT=1"\r\n'
+                'set n=0\r\n:retry\r\nping -n 3 127.0.0.1 >nul\r\n'
                 f'move /y "{new_exe}" "{cur}" >nul 2>&1\r\n'
-                'if errorlevel 1 (set /a n+=1 & if %n% lss 15 goto retry)\r\n'
-                f'start "" "{cur}"\r\ndel "%~f0"\r\n')
-    subprocess.Popen(['cmd', '/c', bat], creationflags=0x08000008, close_fds=True)   # DETACHED | NO_WINDOW
+                'if errorlevel 1 (set /a n+=1 & if %n% lss 30 goto retry)\r\n'
+                'ping -n 5 127.0.0.1 >nul\r\n'
+                f'start "" /d "{os.path.dirname(cur)}" "{cur}"\r\ndel "%~f0"\r\n')
+    subprocess.Popen(['cmd', '/c', bat], creationflags=0x08000008, close_fds=True, env=clean_env())   # DETACHED | NO_WINDOW
 
 def apply_source_update(zip_path, app_dir):
     """Chạy bằng Python: chép các file .py mới đè lên thư mục tool. Trả về danh sách file đã cập nhật."""
