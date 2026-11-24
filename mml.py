@@ -3,6 +3,10 @@ import sys
 
 
 def main():
+    if '--force-eject' in sys.argv:                      # chạy bằng quyền Admin chỉ để ép tháo ổ
+        i = sys.argv.index('--force-eject')
+        import postscan
+        postscan.eject_cli(sys.argv[i + 1], sys.argv[i + 2]); return
     if sys.platform == 'win32':
         try:
             import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)

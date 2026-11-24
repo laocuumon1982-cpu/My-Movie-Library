@@ -33,6 +33,6 @@ Giao diện web (pywebview / Edge WebView2 có sẵn trong Windows 10/11) cùng 
 
 Sau mỗi lần quét xong, tool tự:
 1. **Sao lưu** `Data/library.db` lên PikPak: `My Pack/2026/_Backup My Movie Library/library.db` (ghi đè bản cũ) bằng **rclone**. Không cần RaiDrive. rclone tự tải về thư mục `rclone\` cạnh app nếu chưa có. Đăng nhập một lần ở **⋯ Thêm → Đăng nhập rclone PikPak…** (mật khẩu lưu dạng mã hóa trong `Data/rclone.conf`).
-2. **Ép tháo ổ HDD** vừa quét: Explorer Eject → "Safely Remove Hardware" (cả ổ USB hiện là ổ cố định) → ép ngắt volume → đưa đĩa offline (cần Admin). Không tháo ổ hệ thống, ổ mạng, ổ chứa tool/thư viện, hoặc khi chỉ quét một thư mục con.
+2. **Tháo ổ HDD** vừa quét, chỉ báo thành công khi đĩa vật lý thật sự biến mất khỏi hệ thống. Thử lần lượt: Explorer Eject → Safely Remove Hardware; nếu không được, **tự chuyển sang chế độ ÉP**: ngắt mọi volume bất chấp file đang mở → gỡ thiết bị cùng cây con → vô hiệu thiết bị USB cha → đưa đĩa Offline (các cấp sau cần Administrator, tool tự xin quyền qua UAC). Có thêm nút **⏏ Tháo ổ** để tháo thủ công từng ổ. Không tháo ổ hệ thống, ổ mạng, ổ chứa tool/thư viện, hoặc khi chỉ quét một thư mục con.
 
 Hai việc này bật/tắt bằng 2 ô tick trong hộp thoại quét. **⋯ Thêm → Sao lưu thư viện lên PikPak ngay** để sao lưu thủ công.

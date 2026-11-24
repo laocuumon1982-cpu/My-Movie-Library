@@ -343,6 +343,12 @@ async function start() {
   $("kind").onchange = e => { S.kind = e.target.value; searchFiles(); };
   bindSort($("tbl-f"), "files", searchFiles); bindSort($("tbl-d"), "folders", searchFolders);
   $("bCsv").onclick = $("bCsv2").onclick = exportCsv;
+  $("bEject").onclick = async () => {
+    const h = S.ov.hdds.find(x => x.id === S.hid); if (!h) return;
+    if (!(await confirmD("Tháo ổ", `Tháo ổ ${h.code} · ${h.name}?\nTool thử tháo an toàn trước; nếu không được sẽ tự chuyển sang chế độ ÉP THÁO (có thể cần quyền Administrator).`, "Tháo ổ"))) return;
+    const r = await api("eject_hdd", h.id); if (!r.ok) { toast(r.msg, true); return; }
+    go("scan"); S.logn = 0; $("log").innerHTML = ""; S.scanOn = true; pollScan();
+  };
   $("bRescan").onclick = rescan; $("bEdit").onclick = editHddFlow; $("bDel").onclick = delHdd;
   $("bPickDir").onclick = pickFolder; $("bRefDr").onclick = loadDrives; $("bGo").onclick = startScan;
   $("bStop").onclick = async () => { await api("cancel_scan"); $("bStop").disabled = true; };

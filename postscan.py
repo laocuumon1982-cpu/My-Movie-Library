@@ -133,41 +133,107 @@ def eject_blockers(root, drive, protected_paths):
     return None
 
 
-def eject_drive(letter, force=True):
-    """Tháo ổ `letter` ('E:'). Trả về (ok, thông báo chi tiết). Thử lần lượt:
-    1) Lệnh Eject của Explorer (ổ USB 'rời'); 2) CM_Request_Device_Eject — chính là 'Safely Remove Hardware', chạy được cả với
-    ổ HDD gắn USB hiện là ổ 'cố định'; 3) ép: khóa/ngắt volume bất chấp file đang mở, rồi eject lại; 4) đưa đĩa về offline (cần Admin)."""
+def is_admin():
+    try:
+        import ctypes; return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def eject_drive(letter, force=True, log=None, elevate=True):
+    """Tháo ổ `letter` ('E:'). Trả về (ok, thông báo). ok=True CHỈ KHI đĩa vật lý thật sự biến mất khỏi hệ thống (hoặc đã Offline).
+    Các cấp, dừng ở cấp đầu tiên thành công:
+      1  Explorer Eject          2  Safely Remove (CM_Request_Device_Eject) trên đĩa → thiết bị cha (USB)
+      --- nếu không tháo được thì tự chuyển sang CHẾ ĐỘ ÉP ---
+      3  ép: khóa + ngắt mọi volume của đĩa bất chấp file đang mở → Safely Remove lại
+      4  ép: CM_Query_And_Remove_SubTree (gỡ thiết bị cùng cây con)
+      5  ép (cần Admin): vô hiệu hóa thiết bị USB cha   6  ép (cần Admin): đưa đĩa về Offline
+    Chưa là Admin mà cần ép → tự xin quyền Admin (UAC) rồi chạy lại cấp 3–6."""
+    log = log or (lambda m: None)
     if sys.platform != 'win32': return False, 'Tháo ổ chỉ hỗ trợ trên Windows.'
-    letter = letter.rstrip('\\/').upper(); notes = []
-    if _gone_wait(letter, 0): return True, f'Ổ {letter} đã được tháo.'
-    disk_no = None
-    try: disk_no = _disk_number(letter)
-    except Exception as ex: notes.append(f'đọc số đĩa: {ex}')
-    _shell_eject(letter)
-    if _gone_wait(letter, 3): return True, f'Đã tháo ổ {letter} an toàn — có thể rút cáp.'
-    if disk_no is not None:
-        ok, m = _cm_eject(disk_no); notes.append('Safely-Remove: ' + m)
-        if ok and _gone_wait(letter, 8): return True, f'Đã tháo ổ {letter} an toàn (Safely Remove) — có thể rút cáp.'
-    if not force: return False, f'Ổ {letter} đang bị chương trình khác dùng nên chưa tháo được. ' + ' | '.join(notes)
-    ok, m = _ioctl_eject(letter); notes.append('ép dismount: ' + m)
-    if _gone_wait(letter, 2): return True, f'Đã ép tháo ổ {letter} — có thể rút cáp.'
-    if disk_no is not None:
-        ok2, m2 = _cm_eject(disk_no); notes.append('Safely-Remove lần 2: ' + m2)
-        if ok2 and _gone_wait(letter, 8): return True, f'Đã ép tháo ổ {letter} — có thể rút cáp.'
-        ok3, m3 = _set_offline(disk_no); notes.append('offline: ' + m3)
-        if ok3: return True, f'Đã đưa ổ {letter} (đĩa {disk_no}) về trạng thái Offline — có thể rút cáp.'
-    if ok: return True, f'Đã ngắt (dismount) ổ {letter}; chờ đèn ổ tắt rồi rút cáp. (' + ' | '.join(notes) + ')'
-    return False, f'Không tháo được ổ {letter}: ' + ' | '.join(notes)
+    letter = letter.rstrip('\\/').upper()
+    try: disk = _disk_number(letter)
+    except Exception as ex: disk = None; log(f'Không đọc được số đĩa của {letter}: {ex}')
+    if disk is None:
+        return (True, f'Ổ {letter} không còn trong máy.') if not os.path.exists(letter + '\\') else (False, f'Không xác định được đĩa vật lý của ổ {letter}.')
+    letters = _letters_on_disk(disk) or [letter]
+    log(f'Ổ {", ".join(letters)} thuộc đĩa vật lý số {disk}.')
+    if _wait_gone(disk, 0): return True, f'Đĩa {disk} đã được tháo.'
+
+    log('Cấp 1: lệnh Eject của Explorer…')
+    for l in letters: _shell_eject(l)
+    if _wait_gone(disk, 5): return True, f'Đã tháo ổ {letter} an toàn (Explorer) — có thể rút cáp.'
+    log('Cấp 2: Safely Remove Hardware…')
+    ok, m = _cm_eject(disk); log('   → ' + m)
+    if _wait_gone(disk, 10): return True, f'Đã tháo ổ {letter} an toàn (Safely Remove) — có thể rút cáp.'
+    if not force: return False, f'Ổ {letter} chưa tháo được (đang bị chương trình khác dùng): {m}'
+    return _force_eject(disk, letters, letter, log, elevate)
 
 
-def _gone_wait(letter, secs):
-    end = time.time() + secs
-    while True:
-        if not os.path.exists(letter + '\\'): return True
-        if time.time() >= end: return False
-        time.sleep(0.4)
+def _force_eject(disk, letters, letter, log, elevate):
+    log('⚠ Không tháo an toàn được → CHUYỂN SANG CHẾ ĐỘ ÉP THÁO.')
+    log('Cấp 3: ép ngắt volume (bất chấp file đang mở) rồi Safely Remove lại…')
+    for l in letters:
+        ok, m = _ioctl_eject(l); log(f'   {l} → {m}')
+    ok, m = _cm_eject(disk); log('   Safely Remove → ' + m)
+    if _wait_gone(disk, 10): return True, f'Đã ÉP tháo ổ {letter} — có thể rút cáp.'
+    log('Cấp 4: gỡ thiết bị cùng cây con (CM_Query_And_Remove_SubTree)…')
+    ok, m = _cm_remove_subtree(disk); log('   → ' + m)
+    if _wait_gone(disk, 10): return True, f'Đã ÉP tháo ổ {letter} (gỡ thiết bị) — có thể rút cáp.'
+    if not is_admin():
+        if elevate:
+            log('Cấp 5–6 cần quyền Administrator → xin quyền (hộp thoại UAC)…')
+            r = _run_elevated(letter)
+            if r is None: return False, f'Không tháo được ổ {letter}: chưa được cấp quyền Administrator. Hãy chạy tool bằng "Run as administrator".'
+            return r[0], r[1]
+        return False, f'Không tháo được ổ {letter} (cần quyền Administrator).'
+    log('Cấp 5: vô hiệu hóa thiết bị USB cha (cần Admin)…')
+    ok, m = _cm_disable_parent(disk); log('   → ' + m)
+    if _wait_gone(disk, 8): return True, f'Đã ÉP tháo ổ {letter} (vô hiệu thiết bị) — có thể rút cáp.'
+    log('Cấp 6: đưa đĩa về Offline…')
+    ok, m = _set_offline(disk); log('   → ' + m)
+    if ok and _is_offline(disk): return True, f'Đã ép đĩa {disk} (ổ {letter}) về OFFLINE — ổ không còn truy cập được, có thể rút cáp.'
+    return False, f'KHÔNG tháo được ổ {letter} dù đã ép tất cả các cấp. Hãy đóng mọi cửa sổ/chương trình đang dùng ổ rồi dùng "Safely Remove Hardware" trong khay hệ thống. ({m})'
 
 
+def _run_elevated(letter):
+    """Chạy lại chính tool với quyền Admin (--force-eject) chỉ để ép tháo; trả (ok, msg) hoặc None nếu bị từ chối UAC."""
+    import ctypes, json
+    from ctypes import wintypes
+    out = os.path.join(tempfile.gettempdir(), 'mml_eject_result.json')
+    try: os.remove(out)
+    except OSError: pass
+    exe = sys.executable
+    params = f'--force-eject {letter} "{out}"' if getattr(sys, 'frozen', False) else f'"{os.path.join(app_dir(), "mml.py")}" --force-eject {letter} "{out}"'
+
+    class SEI(ctypes.Structure):
+        _fields_ = [('cbSize', wintypes.DWORD), ('fMask', wintypes.ULONG), ('hwnd', wintypes.HWND), ('lpVerb', wintypes.LPCWSTR),
+                    ('lpFile', wintypes.LPCWSTR), ('lpParameters', wintypes.LPCWSTR), ('lpDirectory', wintypes.LPCWSTR), ('nShow', ctypes.c_int),
+                    ('hInstApp', wintypes.HINSTANCE), ('lpIDList', ctypes.c_void_p), ('lpClass', wintypes.LPCWSTR), ('hkeyClass', wintypes.HKEY),
+                    ('dwHotKey', wintypes.DWORD), ('hIcon', wintypes.HANDLE), ('hProcess', wintypes.HANDLE)]
+    sei = SEI(); sei.cbSize = ctypes.sizeof(SEI); sei.fMask = 0x40; sei.lpVerb = 'runas'; sei.lpFile = exe; sei.lpParameters = params; sei.nShow = 0
+    if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)): return None
+    ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, 150000); ctypes.windll.kernel32.CloseHandle(sei.hProcess)
+    try:
+        with open(out, encoding='utf-8') as f: d = json.load(f)
+        return bool(d['ok']), d['msg']
+    except Exception:
+        return False, 'Bản chạy với quyền Admin không trả kết quả.'
+
+
+def eject_cli(letter, out):
+    """Gọi từ `mml.py --force-eject E: <file>` (đang chạy bằng quyền Admin): chỉ chạy các cấp ép, ghi kết quả ra file."""
+    import json
+    letters, disk = [letter], None
+    try: disk = _disk_number(letter); letters = _letters_on_disk(disk) or [letter]
+    except Exception: pass
+    if disk is None: res = (False, 'Không đọc được đĩa vật lý.')
+    elif _wait_gone(disk, 0): res = (True, f'Đã tháo ổ {letter}.')
+    else: res = _force_eject(disk, letters, letter, lambda m: None, False)
+    with open(out, 'w', encoding='utf-8') as f: json.dump({'ok': bool(res[0]), 'msg': res[1]}, f, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- hạ tầng Windows
 def _shell_eject(letter):
     ps = ("$s=New-Object -comObject Shell.Application;"
           f"$i=$s.Namespace(17).ParseName('{letter}');if($i){{$i.InvokeVerb('Eject')}}")
@@ -205,11 +271,24 @@ def _disk_number(letter):
     finally: ctypes.windll.kernel32.CloseHandle(h)
 
 
-def _cm_eject(disk_no):
-    """Tìm thiết bị đĩa số disk_no (SetupAPI) rồi yêu cầu eject nó hoặc thiết bị cha (USB) — như 'Safely Remove Hardware'."""
+def _letters_on_disk(disk):
+    """Mọi ký tự ổ (phân vùng) nằm trên cùng đĩa vật lý."""
+    import string
+    out = []
+    for c in string.ascii_uppercase:
+        l = c + ':'
+        if not os.path.exists(l + '\\'): continue
+        try:
+            if _disk_number(l) == disk: out.append(l)
+        except Exception: pass
+    return out
+
+
+def _enum_disks():
+    """[(số đĩa, devinst)] của các đĩa đang HIỆN DIỆN trong hệ thống (SetupAPI)."""
     import ctypes
     from ctypes import wintypes
-    k = ctypes.windll.kernel32; sa = ctypes.windll.setupapi; cm = ctypes.windll.cfgmgr32
+    k = ctypes.windll.kernel32; sa = ctypes.windll.setupapi
 
     class GUID(ctypes.Structure):
         _fields_ = [('a', wintypes.DWORD), ('b', wintypes.WORD), ('c', wintypes.WORD), ('d', ctypes.c_ubyte * 8)]
@@ -220,21 +299,21 @@ def _cm_eject(disk_no):
     class DEVINFO(ctypes.Structure):
         _fields_ = [('cbSize', wintypes.DWORD), ('Guid', GUID), ('DevInst', wintypes.DWORD), ('Res', ctypes.c_void_p)]
 
-    disk_guid = GUID(0x53f56307, 0xb6bf, 0x11d0, (ctypes.c_ubyte * 8)(0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b))
+    g = GUID(0x53f56307, 0xb6bf, 0x11d0, (ctypes.c_ubyte * 8)(0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b))
     sa.SetupDiGetClassDevsW.restype = ctypes.c_void_p
     sa.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(GUID), wintypes.LPCWSTR, wintypes.HWND, wintypes.DWORD]
     sa.SetupDiEnumDeviceInterfaces.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(GUID), wintypes.DWORD, ctypes.POINTER(IFACE)]
     sa.SetupDiGetDeviceInterfaceDetailW.argtypes = [ctypes.c_void_p, ctypes.POINTER(IFACE), ctypes.c_void_p, wintypes.DWORD,
                                                     ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(DEVINFO)]
     sa.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
-    hdev = sa.SetupDiGetClassDevsW(ctypes.byref(disk_guid), None, None, 0x12)          # PRESENT | DEVICEINTERFACE
-    if hdev in (None, ctypes.c_void_p(-1).value): return False, 'SetupAPI lỗi'
-    devinst = None
+    hdev = sa.SetupDiGetClassDevsW(ctypes.byref(g), None, None, 0x12)                  # PRESENT | DEVICEINTERFACE
+    if hdev in (None, ctypes.c_void_p(-1).value): return []
+    out = []
     try:
         i = 0
         while True:
             ifc = IFACE(); ifc.cbSize = ctypes.sizeof(IFACE)
-            if not sa.SetupDiEnumDeviceInterfaces(hdev, None, ctypes.byref(disk_guid), i, ctypes.byref(ifc)): break
+            if not sa.SetupDiEnumDeviceInterfaces(hdev, None, ctypes.byref(g), i, ctypes.byref(ifc)): break
             i += 1
             need = wintypes.DWORD(0)
             sa.SetupDiGetDeviceInterfaceDetailW(hdev, ctypes.byref(ifc), None, 0, ctypes.byref(need), None)
@@ -242,37 +321,106 @@ def _cm_eject(disk_no):
             ctypes.c_uint32.from_buffer(buf).value = 8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 6
             di = DEVINFO(); di.cbSize = ctypes.sizeof(DEVINFO)
             if not sa.SetupDiGetDeviceInterfaceDetailW(hdev, ctypes.byref(ifc), buf, need.value, None, ctypes.byref(di)): continue
-            path = ctypes.wstring_at(ctypes.addressof(buf) + 4)
-            h, _e = _open_dev(path, 0)
+            h, _e = _open_dev(ctypes.wstring_at(ctypes.addressof(buf) + 4), 0)
             if h is None: continue
             try: n = _dev_number(h)
             finally: k.CloseHandle(h)
-            if n == disk_no: devinst = di.DevInst; break
+            if n is not None: out.append((n, di.DevInst))
     finally:
         sa.SetupDiDestroyDeviceInfoList(hdev)
-    if devinst is None: return False, f'không tìm thấy thiết bị của đĩa {disk_no}'
+    return out
+
+
+def _wait_gone(disk, secs):
+    """True khi đĩa vật lý `disk` KHÔNG còn trong hệ thống (đã tháo thật). Không dựa vào ký tự ổ."""
+    end = time.time() + secs
+    while True:
+        try: present = any(n == disk for n, _ in _enum_disks())
+        except Exception: present = True
+        if not present: return True
+        if time.time() >= end: return False
+        time.sleep(0.5)
+
+
+def _devinst_chain(disk, levels=3):
+    """devinst của đĩa rồi các thiết bị cha (đĩa → USBSTOR/SCSI → thiết bị USB). Dừng trước hub để không gỡ nhầm thiết bị khác."""
+    import ctypes
+    from ctypes import wintypes
+    cm = ctypes.windll.cfgmgr32
     cm.CM_Get_Parent.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, wintypes.ULONG]
+    node = next((d for n, d in _enum_disks() if n == disk), None)
+    chain = []
+    while node is not None and len(chain) < levels:
+        chain.append(node); par = wintypes.DWORD(0)
+        node = par.value if cm.CM_Get_Parent(ctypes.byref(par), node, 0) == 0 else None
+    return chain
+
+
+def _cm_eject(disk):
+    import ctypes
+    from ctypes import wintypes
+    cm = ctypes.windll.cfgmgr32
     cm.CM_Request_Device_EjectW.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_wchar_p, wintypes.ULONG, wintypes.ULONG]
+    chain = _devinst_chain(disk)
+    if not chain: return False, f'không tìm thấy thiết bị của đĩa {disk}'
     last = ''
-    node = devinst
-    for _ in range(4):                                                             # đĩa → USBSTOR → USB hub/port: thử từng cấp
+    for node in chain:
         veto = wintypes.DWORD(0); name = ctypes.create_unicode_buffer(260)
         cr = cm.CM_Request_Device_EjectW(node, ctypes.byref(veto), name, 260, 0)
         if cr == 0 and veto.value == 0: return True, 'đã gửi yêu cầu tháo thiết bị'
         last = f'CR={cr} veto={veto.value} {name.value}'.strip()
-        par = wintypes.DWORD(0)
-        if cm.CM_Get_Parent(ctypes.byref(par), node, 0) != 0: break
-        node = par.value
     return False, 'Windows từ chối: ' + last
 
 
-def _set_offline(disk_no):
+def _cm_remove_subtree(disk):
+    import ctypes
+    from ctypes import wintypes
+    cm = ctypes.windll.cfgmgr32
+    cm.CM_Query_And_Remove_SubTreeW.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_wchar_p, wintypes.ULONG, wintypes.ULONG]
+    chain = _devinst_chain(disk)
+    if not chain: return False, 'không tìm thấy thiết bị'
+    last = ''
+    for node in chain:
+        veto = wintypes.DWORD(0); name = ctypes.create_unicode_buffer(260)
+        cr = cm.CM_Query_And_Remove_SubTreeW(node, ctypes.byref(veto), name, 260, 2)       # CM_REMOVE_NO_RESTART
+        if cr == 0 and veto.value == 0: return True, 'đã gỡ thiết bị'
+        last = f'CR={cr} veto={veto.value} {name.value}'.strip()
+    return False, 'Windows từ chối: ' + last
+
+
+def _cm_disable_parent(disk):
+    import ctypes
+    from ctypes import wintypes
+    cm = ctypes.windll.cfgmgr32
+    cm.CM_Disable_DevNode.argtypes = [wintypes.DWORD, wintypes.ULONG]
+    chain = _devinst_chain(disk)[1:]                                                       # bỏ chính đĩa, thử thiết bị cha
+    if not chain: return False, 'không tìm thấy thiết bị cha'
+    res = []
+    for node in chain:
+        cr = cm.CM_Disable_DevNode(node, 0); res.append(f'CR={cr}')
+        if cr == 0: return True, 'đã vô hiệu hóa thiết bị'
+    return False, 'không vô hiệu hóa được: ' + ' '.join(res)
+
+
+def _ps(cmd, t=40):
+    r = _run(['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmd], t)
+    return r.returncode == 0, (r.stderr or r.stdout).strip()
+
+
+def _set_offline(disk):
     try:
-        r = _run(['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
-                  f'Set-Disk -Number {int(disk_no)} -IsOffline $true -ErrorAction Stop'], 40)
-        return r.returncode == 0, (r.stderr or r.stdout).strip()[:200] or 'ok'
+        ok, out = _ps(f'Set-Disk -Number {int(disk)} -IsOffline $true -ErrorAction Stop')
+        return ok, out[:200] or 'ok'
     except Exception as ex:
         return False, str(ex)
+
+
+def _is_offline(disk):
+    try:
+        ok, out = _ps(f'(Get-Disk -Number {int(disk)}).IsOffline')
+        return ok and out.strip().lower() == 'true'
+    except Exception:
+        return False
 
 
 def _ioctl_eject(letter):
@@ -282,16 +430,18 @@ def _ioctl_eject(letter):
     k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
                                   ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
     h, err = _open_dev('\\\\.\\' + letter, 0xC0000000)
-    if h is None: return False, f'không mở được ổ (mã lỗi {err}) — thử chạy tool bằng quyền Administrator'
+    if h is None: return False, f'không mở được ổ (mã lỗi {err})'
     ret = wintypes.DWORD(0)
     def ctl(code, buf=None, n=0):
         return bool(k.DeviceIoControl(h, code, buf, n, None, 0, ctypes.byref(ret), None))
     try:
+        locked = False
         for _ in range(4):
-            if ctl(0x00090018): break                                               # FSCTL_LOCK_VOLUME (bỏ qua nếu thất bại)
+            if ctl(0x00090018): locked = True; break                                # FSCTL_LOCK_VOLUME (bỏ qua nếu thất bại — đang ép)
             time.sleep(0.5)
         if not ctl(0x00090020): return False, 'dismount bị từ chối'                  # FSCTL_DISMOUNT_VOLUME
         ctl(0x002D4804, (ctypes.c_ubyte * 4)(0, 0, 0, 0), 4)                        # PREVENT_MEDIA_REMOVAL = FALSE
-        return True, 'đã ngắt volume' if not ctl(0x002D4808) else 'đã gửi eject'     # IOCTL_STORAGE_EJECT_MEDIA
+        ctl(0x002D4808)                                                              # IOCTL_STORAGE_EJECT_MEDIA
+        return True, 'đã ngắt volume' + ('' if locked else ' (ép, có file đang mở)')
     finally:
         k.CloseHandle(h)

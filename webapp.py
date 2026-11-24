@@ -311,7 +311,7 @@ class Api:
             why = postscan.eject_blockers(root, drive, [DATA_DIR, DB_PATH, os.path.abspath(sys.argv[0]), sys.executable])
             if why: e.log(f'⏏ Không tháo ổ: {why}'); s['ej'] = -1
             else:
-                try: ok, msg = postscan.eject_drive(drive['letter'], force=True)
+                try: ok, msg = postscan.eject_drive(drive['letter'], force=True, log=lambda m: e.log('   ⏏ ' + m))
                 except Exception as ex: ok, msg = False, str(ex)
                 e.log(('⏏ ' if ok else '⏏ KHÔNG tháo được — ') + msg); s['ej'] = 100 if ok else -2
         else: s['ej'] = -1
@@ -331,6 +331,27 @@ class Api:
             dest = postscan.backup_db(DB_PATH, DATA_DIR, rc); e.log(f'☁ Đã sao lưu lên PikPak: {dest}'); s['bk'] = 100; return True
         except Exception as ex:
             e.log(f'☁ Sao lưu PikPak THẤT BẠI: {ex}'); s['bk'] = -2; return False
+
+    def eject_hdd(self, hid):
+        """Tháo thủ công 1 ổ đã quét (đang cắm): thử tháo an toàn, không được thì tự chuyển sang ép."""
+        e = self._e; s = e.scan
+        if s['running']: return dict(ok=False, msg='Đang có tác vụ chạy — thử lại sau.')
+        con = e.db()
+        try: h = L.hdd_row(con, hid)
+        finally: con.close()
+        root = e.root_for(h) if h else None
+        if not root: return dict(ok=False, msg='Ổ này chưa cắm vào máy.')
+        drive = next((d for d in (e.drives or []) if os.path.normcase(d['root'].rstrip('\\/')) == os.path.normcase(root.rstrip('\\/'))), None)
+        why = postscan.eject_blockers(root, drive, [DATA_DIR, DB_PATH, os.path.abspath(sys.argv[0]), sys.executable]) if drive else 'Không phải ổ đĩa.'
+        if why: return dict(ok=False, msg='Không tháo ổ: ' + why)
+        s.update(running=True, phase='eject', name=h['name'], log=[], base=0, ej=10, bk=-1, pct=100, files=0, folders=0, bytes=0, cur='', result=None)
+        def work():
+            e.log(f"⏏ Tháo ổ {h['code']} · {h['name']} ({drive['letter']})")
+            try: ok, msg = postscan.eject_drive(drive['letter'], force=True, log=lambda m: e.log('   ⏏ ' + m))
+            except Exception as ex: ok, msg = False, str(ex)
+            e.log(('⏏ ' if ok else '⏏ KHÔNG tháo được — ') + msg); s['ej'] = 100 if ok else -2; s.update(running=False, phase='done')
+        threading.Thread(target=work, daemon=True).start()
+        return dict(ok=True)
 
     def scan_state(self, since=0):
         s = self._e.scan; base = s.get('base', 0)
